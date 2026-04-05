@@ -246,6 +246,8 @@ pkgs.writeShellScriptBin name ''
   runtime_ssh=${if sshForward then "1" else "0"}
   runtime_disable_auto_forwarded_envs=0
   fixed_agent_command=${lib.escapeShellArg (if agentCommand == null then "" else agentCommand)}
+  container_cli=""
+  minimum_container_version="0.10.0"
   command_args=()
 
   print_runtime_help() {
@@ -368,17 +370,77 @@ EOF
     done
   }
 
+  version_gte() {
+    local lhs=$1
+    local rhs=$2
+    local idx lhs_part rhs_part
+    local -a lhs_parts=()
+    local -a rhs_parts=()
+
+    IFS=. read -r -a lhs_parts <<<"$lhs"
+    IFS=. read -r -a rhs_parts <<<"$rhs"
+
+    for idx in 0 1 2; do
+      lhs_part="''${lhs_parts[$idx]:-0}"
+      rhs_part="''${rhs_parts[$idx]:-0}"
+      lhs_part="''${lhs_part%%[^0-9]*}"
+      rhs_part="''${rhs_part%%[^0-9]*}"
+      lhs_part="''${lhs_part:-0}"
+      rhs_part="''${rhs_part:-0}"
+
+      if ((10#$lhs_part > 10#$rhs_part)); then
+        return 0
+      fi
+
+      if ((10#$lhs_part < 10#$rhs_part)); then
+        return 1
+      fi
+    done
+
+    return 0
+  }
+
   ensure_container_cli() {
-    if ! command -v container >/dev/null 2>&1; then
-      echo "error: Apple container CLI not found in PATH" >&2
+    local detected_cli detected_version formula_cli formula_version
+
+    formula_cli="/opt/homebrew/opt/container/bin/container"
+    detected_cli="$(command -v container || true)"
+    detected_version=""
+
+    if [[ -n "$detected_cli" ]]; then
+      detected_version="$("$detected_cli" --version 2>/dev/null | awk '/container CLI version/ { print $4; exit }')"
+      if [[ -n "$detected_version" ]] && version_gte "$detected_version" "$minimum_container_version"; then
+        container_cli="$detected_cli"
+        return 0
+      fi
+    fi
+
+    formula_version=""
+    if [[ -x "$formula_cli" ]]; then
+      formula_version="$("$formula_cli" --version 2>/dev/null | awk '/container CLI version/ { print $4; exit }')"
+      if [[ -n "$formula_version" ]] && version_gte "$formula_version" "$minimum_container_version"; then
+        container_cli="$formula_cli"
+        if [[ -n "$detected_cli" ]] && [[ "$detected_cli" != "$formula_cli" ]]; then
+          echo "warning: ignoring outdated container CLI at $detected_cli (found ''${detected_version:-unknown}); using $formula_cli (''${formula_version})" >&2
+        fi
+        return 0
+      fi
+    fi
+
+    if [[ -n "$detected_cli" ]]; then
+      echo "error: container CLI at $detected_cli is too old (found ''${detected_version:-unknown}; need >= $minimum_container_version)" >&2
+      echo "hint: remove the legacy Homebrew cask or update PATH to prefer /opt/homebrew/opt/container/bin/container" >&2
       exit 1
     fi
+
+    echo "error: Apple container CLI not found in PATH" >&2
+    exit 1
   }
 
   ensure_container_system() {
-    if ! container system status >/dev/null 2>&1; then
+    if ! "$container_cli" system status >/dev/null 2>&1; then
       echo "starting Apple Containers service..." >&2
-      container system start --enable-kernel-install >/dev/null
+      "$container_cli" system start --enable-kernel-install >/dev/null
     fi
   }
 
@@ -397,7 +459,7 @@ EOF
 ${entrypoint}
 EOF
 
-    container build -t "$image_tag" "$context_dir"
+    "$container_cli" build -t "$image_tag" "$context_dir"
     touch "$marker_path"
   }
 
@@ -595,7 +657,7 @@ ${autoForwardedEnvBlock}
     run_args+=("$image_tag")
 ${commandDispatchBlock}
 
-    container "''${run_args[@]}"
+    "$container_cli" "''${run_args[@]}"
   }
 
   main "$@"
