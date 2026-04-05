@@ -1,0 +1,8 @@
+{
+  "packages": [
+    "go@1.22",
+    "python@3.12",
+    "nodejs@20",
+    "jq"
+  ]
+}

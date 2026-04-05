@@ -1,0 +1,25 @@
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive HOME=/root TERM=xterm-256color LANG=C.UTF-8
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      ca-certificates \
+      curl \
+      git \
+      jq \
+      nodejs \
+      npm \
+      ripgrep \
+      unzip && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN npm install -g @anthropic-ai/claude-code @openai/codex @google/gemini-cli
+
+RUN mkdir -p /workspace
+WORKDIR /workspace
+
+COPY entrypoint.sh /usr/local/bin/sandbox-entrypoint.sh
+RUN chmod +x /usr/local/bin/sandbox-entrypoint.sh
+
+ENTRYPOINT ["/usr/local/bin/sandbox-entrypoint.sh"]

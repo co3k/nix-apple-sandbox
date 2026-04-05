@@ -1,0 +1,5 @@
+{
+  "name": "nix-project-auto",
+  "private": true,
+  "type": "module"
+}
