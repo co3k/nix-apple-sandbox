@@ -151,14 +151,14 @@ nix-apple-sandbox -- gemini
 `mkSandboxedCommand` は固定の `agentCommand` を持たず、`--` の後ろをそのままコンテナ内で実行する。何も渡さなければ `bash` を起動する。
 `autoPassEnvByCommand = { claude = [ "ANTHROPIC_API_KEY" ]; codex = [ "OPENAI_API_KEY" ]; gemini = [ "GEMINI_API_KEY" "GOOGLE_API_KEY" ]; };` のように指定すると、先頭の実行コマンドに応じて必要な env だけを自動転送できる。repo 付属の generic `nix-apple-sandbox` package はこの方式をデフォルトで使う。完全に止めたい場合は `--sandbox-no-auto-pass-env`、特定の env だけ外したい場合は `--sandbox-drop-pass-env NAME` を使う。明示的な `passEnv` や `--sandbox-pass-env` は引き続き追加できる。
 
-CLI の設定ディレクトリを持ち込みたい場合は `homeMounts` を使う。例えば `homeMounts = [ ".claude" ".agents" ];` とすると、ホスト側の `~/.claude` と `~/.agents` がそれぞれ `/root/.claude` と `/root/.agents` にマウントされる。存在しないパスは warning を出してスキップする。
+CLI の設定ディレクトリを持ち込みたい場合は `homeMounts` を使う。例えば `homeMounts = [ ".claude" ".agents" ];` とすると、ホスト側の `~/.claude` と `~/.agents` がそれぞれ `/home/sandbox/.claude` と `/home/sandbox/.agents` にマウントされる。存在しないパスは warning を出してスキップする。コンテナ内のプロセスは host の UID/GID に合わせた非 root ユーザとして実行される。
 
 生成された wrapper は実行時 override も受ける。予約済みの `--sandbox-*` オプションだけを wrapper 側で解釈し、それ以外はそのままエージェント CLI に渡す。
 
 ```bash
 nix-apple-sandbox \
   --sandbox-home-mount .claude \
-  --sandbox-home-mount .agents:/root/.agents \
+  --sandbox-home-mount .agents:/home/sandbox/.agents \
   --sandbox-env FOO=bar \
   --sandbox-cpus 8 \
   --sandbox-memory 16g \
@@ -294,7 +294,7 @@ mkSandboxedCommand {
   installCommands     ? ""     # 実行したい CLI のインストール処理
   passEnv             ? []     # 必要なら認証・設定用 env を転送
   autoPassEnvByCommand ? {}    # { claude = [ "ANTHROPIC_API_KEY" ]; ... }
-  homeMounts          ? []     # [".claude" ".agents:/root/.agents"]
+  homeMounts          ? []     # [".claude" ".agents:/home/sandbox/.agents"]
   cpus                ? 4
   memory              ? "8g"
   allowAllOutbound    ? false
