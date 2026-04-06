@@ -1,5 +1,5 @@
 {
-  description = "Example: Auto-detection with fromProjectDir";
+  description = "Example: fromProjectDir auto-detection";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";

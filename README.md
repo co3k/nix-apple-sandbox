@@ -8,25 +8,46 @@ Apple Containers + Nix によるコーディングエージェント向けハー
 
 - Mac with Apple Silicon + macOS 26 (Tahoe)
 - [`container` CLI](https://github.com/apple/container/releases) v0.10.0+
-- Nix は必須ではない → [Nix なしで使う](#nix-なしで使う)
+- Nix (flakes 有効)
 
 ## クイックスタート
 
 ```bash
 container system start --enable-kernel-install  # 初回のみ
-git clone <this-repo> && cd nix-apple-sandbox
+mkdir my-agent-project && cd my-agent-project
+nix flake init -t github:co3k/nix-apple-sandbox#generic-command
 nix develop
 nix-apple-sandbox -- claude
 ```
 
+利用可能テンプレートは `nix flake show github:co3k/nix-apple-sandbox` で確認できる。
+
 ## `git clone` なしで使う
 
-この repo をローカルに clone しなくても、flake input として直接参照できる。
+この repo はテンプレートとして直接参照できる。新規ディレクトリなら `nix flake new`、既存ディレクトリなら `nix flake init` を使う。
 
-1. 自分のプロジェクトの `flake.nix` に `github:co3k/nix-apple-sandbox` を追加する
-2. `apple-sandbox.lib.${system}.integrateWith pkgs` を取り出す
-3. 自分の `devShell` に `sandbox.mkSandboxedCommand { ... }` や `sandbox.mkSandboxedClaudeCode { ... }` を入れる
-4. そのプロジェクトで `nix develop` して、生成された `sandboxed-*` / `nix-apple-sandbox` コマンドを実行する
+```bash
+nix flake new -t github:co3k/nix-apple-sandbox#generic-command my-agent-project
+cd my-agent-project
+nix develop
+```
+
+```bash
+mkdir my-agent-project && cd my-agent-project
+nix flake init -t github:co3k/nix-apple-sandbox#generic-command
+nix develop
+```
+
+テンプレート名は統合パターンに対応している:
+
+| テンプレート | 用途 |
+|---|---|
+| `#generic-command` | `mkSandboxedCommand` で `nix-apple-sandbox -- <command>` を使う |
+| `#nix-packages` | `nixPackages` を sandbox に自動マッピングする |
+| `#from-devbox` | `devbox.json` から構成する |
+| `#from-project-dir` | プロジェクトのファイルから自動検出する |
+
+テンプレートを使わず、自分の既存 `flake.nix` へライブラリとして組み込むこともできる。
 
 ```nix
 {
@@ -70,9 +91,17 @@ nix-apple-sandbox -- claude
 
 clone が必要なのはこの repo 自体を開発・変更したいときだけで、利用するだけなら不要。
 
+## この repo 自体を開発する
+
+```bash
+git clone <this-repo> && cd nix-apple-sandbox
+nix develop
+```
+
 ## 既存プロジェクトとの統合
 
 4つの統合パスがある。プロジェクトの環境に応じて選ぶ。
+対応するサンプルとテンプレートは `examples/generic-command`, `examples/nix-packages`, `examples/from-devbox`, `examples/from-project-dir` に置いてある。
 
 ### パターン1: 任意のエージェント/コマンドを実行する
 
@@ -244,17 +273,6 @@ devbox をメインの環境管理に使い、サンドボックスだけ Nix fl
 })
 ```
 
-## Nix なしで使う
-
-`examples/standalone/` に Containerfile とシェルスクリプトがある。
-
-```bash
-cd examples/standalone
-./nix-apple-sandbox.sh -- claude
-```
-
-認証方式は各エージェント CLI の通常フローに委ねる。standalone 例は `claude/codex/gemini` についてコマンド名に応じた API キーを自動転送する。止めたい場合は `NIX_APPLE_SANDBOX_NO_AUTO_PASS_ENV=1`、特定の env だけ外したい場合は `NIX_APPLE_SANDBOX_DROP_PASS_ENV="GEMINI_API_KEY"` を使う。明示追加は `NIX_APPLE_SANDBOX_PASS_ENV="ANTHROPIC_API_KEY OPENAI_API_KEY"` のように指定できる。
-
 ## API レベル
 
 | レベル | 関数 | 用途 |
@@ -324,13 +342,10 @@ nix-apple-sandbox/
 ├── scripts/
 │   └── sandbox-ctl.sh                     # 管理ユーティリティ
 └── examples/
-    ├── go-project/flake.nix               # nixPackages 統合
-    ├── devbox-project/{flake.nix,devbox.json} # devbox.json 統合
-    ├── nix-project-auto/flake.nix         # fromProjectDir 自動検出
-    └── standalone/                        # Nix 不要
-        ├── Containerfile
-        ├── entrypoint.sh
-        └── nix-apple-sandbox.sh
+    ├── generic-command/flake.nix          # mkSandboxedCommand
+    ├── nix-packages/flake.nix             # nixPackages 統合
+    ├── from-devbox/{flake.nix,devbox.json} # fromDevboxJson 統合
+    └── from-project-dir/{flake.nix,package.json} # fromProjectDir 自動検出
 ```
 
 ## 管理
