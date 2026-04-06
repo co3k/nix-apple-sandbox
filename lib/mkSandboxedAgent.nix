@@ -20,7 +20,10 @@ let
     "unzip"
     "tar"
     "procps"
+    "util-linux"
   ];
+
+  sandboxHome = "/home/sandbox";
 
   sortUnique = values: lib.sort builtins.lessThan (lib.unique values);
 
@@ -40,6 +43,7 @@ let
       resolvedPackages =
         sortUnique (
           aptPackages
+          ++ [ "util-linux" ]
           ++ lib.optional (!allowAllOutbound) "iptables"
           ++ lib.optional (!allowAllOutbound) "dnsutils"
         );
@@ -52,11 +56,11 @@ let
     in lib.concatStringsSep "\n" (
       lib.filter (chunk: chunk != "") [
         "FROM ${baseImage}"
-        "ENV DEBIAN_FRONTEND=noninteractive HOME=/root TERM=xterm-256color LANG=C.UTF-8"
+        "ENV DEBIAN_FRONTEND=noninteractive HOME=${sandboxHome} TERM=xterm-256color LANG=C.UTF-8"
         extraEnvBlock
         installPackageBlock
+        "RUN mkdir -p /workspace ${sandboxHome}"
         (lib.optionalString (installCommands != "") installCommands)
-        "RUN mkdir -p /workspace"
         "WORKDIR /workspace"
         "COPY entrypoint.sh /usr/local/bin/sandbox-entrypoint.sh"
         "RUN chmod +x /usr/local/bin/sandbox-entrypoint.sh"
@@ -82,7 +86,17 @@ let
           #!/usr/bin/env bash
           set -euo pipefail
 
-          exec "$@"
+          sandbox_home=${lib.escapeShellArg sandboxHome}
+          sandbox_uid="''${NIX_APPLE_SANDBOX_UID:-1000}"
+          sandbox_gid="''${NIX_APPLE_SANDBOX_GID:-1000}"
+          sandbox_user="''${NIX_APPLE_SANDBOX_USER:-sandbox}"
+
+          mkdir -p "$sandbox_home"
+          chown "$sandbox_uid:$sandbox_gid" "$sandbox_home"
+          cd /workspace
+
+          exec env HOME="$sandbox_home" USER="$sandbox_user" LOGNAME="$sandbox_user" \
+            setpriv --reuid "$sandbox_uid" --regid "$sandbox_gid" --clear-groups "$@"
         ''
       else
         ''
@@ -90,6 +104,19 @@ let
           set -euo pipefail
 
           allowed_domains=(${renderedDomains})
+          sandbox_home=${lib.escapeShellArg sandboxHome}
+          sandbox_uid="''${NIX_APPLE_SANDBOX_UID:-1000}"
+          sandbox_gid="''${NIX_APPLE_SANDBOX_GID:-1000}"
+          sandbox_user="''${NIX_APPLE_SANDBOX_USER:-sandbox}"
+
+          exec_as_sandbox() {
+            mkdir -p "$sandbox_home"
+            chown "$sandbox_uid:$sandbox_gid" "$sandbox_home"
+            cd /workspace
+
+            exec env HOME="$sandbox_home" USER="$sandbox_user" LOGNAME="$sandbox_user" \
+              setpriv --reuid "$sandbox_uid" --regid "$sandbox_gid" --clear-groups "$@"
+          }
 
           setup_network_filter() {
             if ! command -v iptables >/dev/null 2>&1; then
@@ -134,7 +161,7 @@ let
           }
 
           setup_network_filter
-          exec "$@"
+          exec_as_sandbox "$@"
         '';
 in
 {
@@ -263,7 +290,7 @@ runtime options:
   --sandbox-no-auto-pass-env
                             Disable command-based automatic env forwarding
   --sandbox-env NAME=VALUE  Inject one env var directly for this run
-  --sandbox-home-mount SPEC Mount a path from \$HOME (example: .claude or .agents:/root/.agents)
+  --sandbox-home-mount SPEC Mount a path from \$HOME (example: .claude or .agents:${sandboxHome}/.agents)
   --sandbox-volume SPEC     Add one raw volume mount (host:guest)
   --sandbox-publish SPEC    Add one published port (host:container)
   --sandbox-network NAME    Override container network for this run
@@ -509,7 +536,7 @@ EOF
       fi
 
       if [[ -z "$guest_path" ]]; then
-        guest_path="/root/$relative_path"
+        guest_path="${sandboxHome}/$relative_path"
       fi
 
       if [[ ! -e "$source_path" ]]; then
@@ -629,6 +656,9 @@ ${autoForwardedEnvBlock}
 
     workspace_dir="$(pwd -P)"
     run_args=(run --rm -it --cpus "$runtime_cpus" --memory "$runtime_memory" --volume "$workspace_dir:/workspace")
+    run_args+=(--env "NIX_APPLE_SANDBOX_UID=$(id -u)")
+    run_args+=(--env "NIX_APPLE_SANDBOX_GID=$(id -g)")
+    run_args+=(--env "NIX_APPLE_SANDBOX_USER=''${USER:-sandbox}")
 
     if [[ -n "$runtime_network" ]]; then
       run_args+=(--network "$runtime_network")
