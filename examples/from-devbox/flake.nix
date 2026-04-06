@@ -1,5 +1,5 @@
 {
-  description = "Example: Go project with nix-apple-sandbox";
+  description = "Example: fromDevboxJson integration with nix-apple-sandbox";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
@@ -14,16 +14,11 @@
       system = "aarch64-darwin";
       pkgs = nixpkgs.legacyPackages.${system};
       sandbox = apple-sandbox.lib.${system}.integrateWith pkgs;
-      projectPackages = with pkgs; [ go gopls postgresql ];
     in {
       devShells.${system}.default = pkgs.mkShell {
-        packages = projectPackages ++ [
-          (sandbox.mkSandboxedClaudeCode {
-            nixPackages = projectPackages;
+        packages = [
+          (sandbox.fromDevboxJson ./devbox.json {
             sshForward = true;
-          })
-          (sandbox.mkSandboxedShell {
-            nixPackages = projectPackages;
           })
         ];
       };
