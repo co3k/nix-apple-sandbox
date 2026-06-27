@@ -34,28 +34,29 @@ let
     "files.pythonhosted.org"
   ];
 
-  joinInstallCommands = commands:
-    lib.concatStringsSep "\n" (lib.filter (command: command != "") commands);
+  joinInstallCommands =
+    commands: lib.concatStringsSep "\n" (lib.filter (command: command != "") commands);
 
-  mkSandboxedCommand = {
-    name ? "nix-apple-sandbox",
-    extraAptPackages ? [ ],
-    extraAllowedDomains ? [ ],
-    installCommands ? "",
-    passEnv ? [ ],
-    autoPassEnvByCommand ? { },
-    envVars ? { },
-    cpus ? 4,
-    memory ? "8g",
-    allowAllOutbound ? false,
-    allowDns ? true,
-    sshForward ? false,
-    homeMounts ? [ ],
-    publishPorts ? [ ],
-    extraVolumes ? [ ],
-    network ? null,
-    baseImage ? "ubuntu:24.04"
-  }:
+  mkSandboxedCommand =
+    {
+      name ? "nix-apple-sandbox",
+      extraAptPackages ? [ ],
+      extraAllowedDomains ? [ ],
+      installCommands ? "",
+      passEnv ? [ ],
+      autoPassEnvByCommand ? { },
+      envVars ? { },
+      cpus ? 4,
+      memory ? "8g",
+      allowAllOutbound ? false,
+      allowDns ? true,
+      sshForward ? false,
+      homeMounts ? [ ],
+      publishPorts ? [ ],
+      extraVolumes ? [ ],
+      network ? null,
+      baseImage ? "ubuntu:24.04",
+    }:
     mkSandboxedAgent {
       inherit
         name
@@ -72,31 +73,33 @@ let
         homeMounts
         publishPorts
         extraVolumes
-        network;
+        network
+        ;
       aptPackages = commonAptPackages ++ extraAptPackages;
       allowedDomains = defaultAllowedDomains ++ extraAllowedDomains;
     };
 
-  mkNodeAgent = {
-    name,
-    agentCommand,
-    npmPackage,
-    passEnv,
-    baseAllowedDomains,
-    extraAptPackages ? [ ],
-    extraAllowedDomains ? [ ],
-    cpus ? 4,
-    memory ? "8g",
-    allowAllOutbound ? false,
-    allowDns ? true,
-    sshForward ? false,
-    homeMounts ? [ ],
-    publishPorts ? [ ],
-    extraVolumes ? [ ],
-    network ? null,
-    envVars ? { },
-    baseImage ? "ubuntu:24.04"
-  }:
+  mkNodeAgent =
+    {
+      name,
+      agentCommand,
+      npmPackage,
+      passEnv,
+      baseAllowedDomains,
+      extraAptPackages ? [ ],
+      extraAllowedDomains ? [ ],
+      cpus ? 4,
+      memory ? "8g",
+      allowAllOutbound ? false,
+      allowDns ? true,
+      sshForward ? false,
+      homeMounts ? [ ],
+      publishPorts ? [ ],
+      extraVolumes ? [ ],
+      network ? null,
+      envVars ? { },
+      baseImage ? "ubuntu:24.04",
+    }:
     mkSandboxedAgent {
       inherit
         name
@@ -112,29 +115,38 @@ let
         homeMounts
         publishPorts
         extraVolumes
-        network;
-      aptPackages = commonAptPackages ++ [ "nodejs" "npm" ] ++ extraAptPackages;
+        network
+        ;
+      aptPackages =
+        commonAptPackages
+        ++ [
+          "nodejs"
+          "npm"
+        ]
+        ++ extraAptPackages;
       allowedDomains = baseAllowedDomains ++ extraAllowedDomains;
       installCommands = joinInstallCommands [
         "RUN npm install -g ${npmPackage}"
       ];
     };
-in {
+in
+{
   inherit mkSandboxedAgent commonAptPackages defaultAllowedDomains;
   inherit mkSandboxedCommand;
 
-  mkSandboxedClaudeCode = {
-    extraAptPackages ? [ ],
-    extraAllowedDomains ? [ ],
-    cpus ? 4,
-    memory ? "8g",
-    allowAllOutbound ? false,
-    sshForward ? false,
-    homeMounts ? [ ],
-    publishPorts ? [ ],
-    extraVolumes ? [ ],
-    network ? null
-  }:
+  mkSandboxedClaudeCode =
+    {
+      extraAptPackages ? [ ],
+      extraAllowedDomains ? [ ],
+      cpus ? 4,
+      memory ? "8g",
+      allowAllOutbound ? false,
+      sshForward ? false,
+      homeMounts ? [ ],
+      publishPorts ? [ ],
+      extraVolumes ? [ ],
+      network ? null,
+    }:
     mkNodeAgent {
       name = "sandboxed-claude-code";
       agentCommand = "claude";
@@ -151,21 +163,23 @@ in {
         homeMounts
         publishPorts
         extraVolumes
-        network;
+        network
+        ;
     };
 
-  mkSandboxedCodex = {
-    extraAptPackages ? [ ],
-    extraAllowedDomains ? [ ],
-    cpus ? 4,
-    memory ? "8g",
-    allowAllOutbound ? false,
-    sshForward ? false,
-    homeMounts ? [ ],
-    publishPorts ? [ ],
-    extraVolumes ? [ ],
-    network ? null
-  }:
+  mkSandboxedCodex =
+    {
+      extraAptPackages ? [ ],
+      extraAllowedDomains ? [ ],
+      cpus ? 4,
+      memory ? "8g",
+      allowAllOutbound ? false,
+      sshForward ? false,
+      homeMounts ? [ ],
+      publishPorts ? [ ],
+      extraVolumes ? [ ],
+      network ? null,
+    }:
     mkNodeAgent {
       name = "sandboxed-codex";
       agentCommand = "codex";
@@ -182,26 +196,31 @@ in {
         homeMounts
         publishPorts
         extraVolumes
-        network;
+        network
+        ;
     };
 
-  mkSandboxedGemini = {
-    extraAptPackages ? [ ],
-    extraAllowedDomains ? [ ],
-    cpus ? 4,
-    memory ? "8g",
-    allowAllOutbound ? false,
-    sshForward ? false,
-    homeMounts ? [ ],
-    publishPorts ? [ ],
-    extraVolumes ? [ ],
-    network ? null
-  }:
+  mkSandboxedGemini =
+    {
+      extraAptPackages ? [ ],
+      extraAllowedDomains ? [ ],
+      cpus ? 4,
+      memory ? "8g",
+      allowAllOutbound ? false,
+      sshForward ? false,
+      homeMounts ? [ ],
+      publishPorts ? [ ],
+      extraVolumes ? [ ],
+      network ? null,
+    }:
     mkNodeAgent {
       name = "sandboxed-gemini";
       agentCommand = "gemini";
       npmPackage = "@google/gemini-cli";
-      passEnv = [ "GEMINI_API_KEY" "GOOGLE_API_KEY" ];
+      passEnv = [
+        "GEMINI_API_KEY"
+        "GOOGLE_API_KEY"
+      ];
       baseAllowedDomains = defaultAllowedDomains ++ [ "generativelanguage.googleapis.com" ];
       inherit
         extraAptPackages
@@ -213,23 +232,32 @@ in {
         homeMounts
         publishPorts
         extraVolumes
-        network;
+        network
+        ;
     };
 
-  mkSandboxedShell = {
-    extraAptPackages ? [ ],
-    cpus ? 4,
-    memory ? "8g",
-    homeMounts ? [ ],
-    publishPorts ? [ ],
-    extraVolumes ? [ ],
-    network ? null
-  }:
+  mkSandboxedShell =
+    {
+      extraAptPackages ? [ ],
+      cpus ? 4,
+      memory ? "8g",
+      homeMounts ? [ ],
+      publishPorts ? [ ],
+      extraVolumes ? [ ],
+      network ? null,
+    }:
     mkSandboxedAgent {
       name = "sandboxed-shell";
       agentCommand = "bash";
       aptPackages = commonAptPackages ++ extraAptPackages;
       allowAllOutbound = true;
-      inherit cpus memory homeMounts publishPorts extraVolumes network;
+      inherit
+        cpus
+        memory
+        homeMounts
+        publishPorts
+        extraVolumes
+        network
+        ;
     };
 }

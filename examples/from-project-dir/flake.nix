@@ -9,12 +9,14 @@
     };
   };
 
-  outputs = { nixpkgs, apple-sandbox, ... }:
+  outputs =
+    { nixpkgs, apple-sandbox, ... }:
     let
       system = "aarch64-darwin";
       pkgs = nixpkgs.legacyPackages.${system};
       sandbox = apple-sandbox.lib.${system}.integrateWith pkgs;
-    in {
+    in
+    {
       devShells.${system}.default = pkgs.mkShell {
         packages = [
           (sandbox.fromProjectDir ./. {
