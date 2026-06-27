@@ -34,6 +34,39 @@ let
     "files.pythonhosted.org"
   ];
 
+  defaultHostCredentialImports = {
+    codexAuth = {
+      name = "codex-auth";
+      kind = "file";
+      source = ".codex/auth.json";
+      target = ".codex/auth.json";
+    };
+
+    claudeCodeOAuth = {
+      name = "claude-code-oauth";
+      kind = "keychain-generic-password";
+      keychainService = "Claude Code-credentials";
+      target = ".claude/.credentials.json";
+      # Claude Code stores several credential groups in this Keychain item on
+      # macOS. Only stage the first-party Claude OAuth payload by default, not
+      # MCP provider OAuth tokens that may also be present.
+      jqFilter = "{claudeAiOauth}";
+    };
+
+    geminiOAuth = {
+      name = "gemini-oauth";
+      kind = "file";
+      source = ".gemini/oauth_creds.json";
+      target = ".gemini/oauth_creds.json";
+    };
+  };
+
+  defaultAutoHostCredentialImportsByCommand = {
+    claude = [ defaultHostCredentialImports.claudeCodeOAuth ];
+    codex = [ defaultHostCredentialImports.codexAuth ];
+    gemini = [ defaultHostCredentialImports.geminiOAuth ];
+  };
+
   joinInstallCommands =
     commands: lib.concatStringsSep "\n" (lib.filter (command: command != "") commands);
 
@@ -45,6 +78,8 @@ let
       installCommands ? "",
       passEnv ? [ ],
       autoPassEnvByCommand ? { },
+      hostCredentialImports ? [ ],
+      autoHostCredentialImportsByCommand ? { },
       envVars ? { },
       cpus ? 4,
       memory ? "8g",
@@ -68,6 +103,8 @@ let
         allowDns
         passEnv
         autoPassEnvByCommand
+        hostCredentialImports
+        autoHostCredentialImportsByCommand
         envVars
         sshForward
         homeMounts
@@ -86,6 +123,8 @@ let
       npmPackage,
       passEnv,
       baseAllowedDomains,
+      hostCredentialImports ? [ ],
+      autoHostCredentialImportsByCommand ? { },
       extraAptPackages ? [ ],
       extraAllowedDomains ? [ ],
       cpus ? 4,
@@ -110,6 +149,8 @@ let
         allowAllOutbound
         allowDns
         passEnv
+        hostCredentialImports
+        autoHostCredentialImportsByCommand
         envVars
         sshForward
         homeMounts
@@ -132,6 +173,7 @@ let
 in
 {
   inherit mkSandboxedAgent commonAptPackages defaultAllowedDomains;
+  inherit defaultHostCredentialImports defaultAutoHostCredentialImportsByCommand;
   inherit mkSandboxedCommand;
 
   mkSandboxedClaudeCode =
@@ -141,6 +183,8 @@ in
       cpus ? 4,
       memory ? "8g",
       allowAllOutbound ? false,
+      importHostCredentials ? true,
+      hostCredentialImports ? lib.optional importHostCredentials defaultHostCredentialImports.claudeCodeOAuth,
       sshForward ? false,
       homeMounts ? [ ],
       publishPorts ? [ ],
@@ -153,6 +197,7 @@ in
       npmPackage = "@anthropic-ai/claude-code";
       passEnv = [ "ANTHROPIC_API_KEY" ];
       baseAllowedDomains = defaultAllowedDomains;
+      inherit hostCredentialImports;
       inherit
         extraAptPackages
         extraAllowedDomains
@@ -174,6 +219,8 @@ in
       cpus ? 4,
       memory ? "8g",
       allowAllOutbound ? false,
+      importHostCredentials ? true,
+      hostCredentialImports ? lib.optional importHostCredentials defaultHostCredentialImports.codexAuth,
       sshForward ? false,
       homeMounts ? [ ],
       publishPorts ? [ ],
@@ -186,6 +233,7 @@ in
       npmPackage = "@openai/codex";
       passEnv = [ "OPENAI_API_KEY" ];
       baseAllowedDomains = defaultAllowedDomains ++ [ "api.openai.com" ];
+      inherit hostCredentialImports;
       inherit
         extraAptPackages
         extraAllowedDomains
@@ -207,6 +255,8 @@ in
       cpus ? 4,
       memory ? "8g",
       allowAllOutbound ? false,
+      importHostCredentials ? true,
+      hostCredentialImports ? lib.optional importHostCredentials defaultHostCredentialImports.geminiOAuth,
       sshForward ? false,
       homeMounts ? [ ],
       publishPorts ? [ ],
@@ -222,6 +272,7 @@ in
         "GOOGLE_API_KEY"
       ];
       baseAllowedDomains = defaultAllowedDomains ++ [ "generativelanguage.googleapis.com" ];
+      inherit hostCredentialImports;
       inherit
         extraAptPackages
         extraAllowedDomains

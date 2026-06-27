@@ -39,10 +39,8 @@
                 "GOOGLE_API_KEY"
               ];
             };
-            homeMounts = [
-              ".claude"
-              ".agents"
-            ];
+            autoHostCredentialImportsByCommand = sandbox.defaultAutoHostCredentialImportsByCommand;
+            homeMounts = [ ".agents" ];
             sshForward = true;
           })
         ];

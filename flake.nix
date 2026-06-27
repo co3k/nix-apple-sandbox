@@ -46,6 +46,7 @@
             "GOOGLE_API_KEY"
           ];
         };
+        autoHostCredentialImportsByCommand = exportedLib.presets.defaultAutoHostCredentialImportsByCommand;
       };
       mkTemplate =
         {

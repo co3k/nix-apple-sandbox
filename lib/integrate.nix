@@ -113,7 +113,12 @@ let
 in
 {
   inherit packageMap;
-  inherit (presets) commonAptPackages defaultAllowedDomains;
+  inherit (presets)
+    commonAptPackages
+    defaultAllowedDomains
+    defaultHostCredentialImports
+    defaultAutoHostCredentialImportsByCommand
+    ;
 
   mkSandboxedAgent = args: presets.mkSandboxedAgent (mergeResolvedAgentPackages args);
 
