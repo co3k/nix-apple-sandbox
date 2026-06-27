@@ -56,7 +56,7 @@ let
     in lib.concatStringsSep "\n" (
       lib.filter (chunk: chunk != "") [
         "FROM ${baseImage}"
-        "ENV DEBIAN_FRONTEND=noninteractive HOME=${sandboxHome} TERM=xterm-256color LANG=C.UTF-8"
+        "ENV DEBIAN_FRONTEND=noninteractive HOME=/root TERM=xterm-256color LANG=C.UTF-8"
         extraEnvBlock
         installPackageBlock
         "RUN mkdir -p /workspace ${sandboxHome}"
@@ -76,10 +76,7 @@ let
   }:
     let
       renderedDomains = lib.concatStringsSep " " (map lib.escapeShellArg (sortUnique allowedDomains));
-      dnsBlock = lib.optionalString allowDns ''
-        iptables -A OUTPUT -p udp --dport 53 -j ACCEPT
-        iptables -A OUTPUT -p tcp --dport 53 -j ACCEPT
-      '';
+      allowDnsFlag = if allowDns then "1" else "0";
     in
       if allowAllOutbound then
         ''
@@ -119,31 +116,159 @@ let
           }
 
           setup_network_filter() {
+            local allow_dns=${allowDnsFlag}
+            local ipv6_filter_available=0
+            local -a dns_resolvers_v4=()
+            local -a dns_resolvers_v6=()
+            local -a resolved_ipv4=()
+            local -a resolved_ipv6=()
+            local -a resolved_host_ips=()
+            local -a resolved_host_names=()
+
             if ! command -v iptables >/dev/null 2>&1; then
-              echo "warning: iptables unavailable; outbound filter disabled" >&2
-              return 0
+              echo "error: iptables unavailable; refusing to start without outbound filter" >&2
+              exit 1
             fi
 
             if ! iptables -L OUTPUT >/dev/null 2>&1; then
-              echo "warning: iptables unsupported by kernel; outbound filter disabled" >&2
-              return 0
+              echo "error: iptables unsupported by kernel; refusing to start without outbound filter" >&2
+              exit 1
+            fi
+
+            if command -v ip6tables >/dev/null 2>&1 && ip6tables -L OUTPUT >/dev/null 2>&1; then
+              ipv6_filter_available=1
+            elif ipv6_network_available; then
+              echo "error: ip6tables unavailable or unsupported while IPv6 networking is enabled; refusing to start without IPv6 outbound filter" >&2
+              exit 1
             fi
 
             rollback_filter() {
               iptables -P OUTPUT ACCEPT >/dev/null 2>&1 || true
               iptables -F OUTPUT >/dev/null 2>&1 || true
+              if ((ipv6_filter_available)); then
+                ip6tables -P OUTPUT ACCEPT >/dev/null 2>&1 || true
+                ip6tables -F OUTPUT >/dev/null 2>&1 || true
+              fi
             }
 
             trap rollback_filter ERR
 
+            iptables -P OUTPUT DROP
+            if ((ipv6_filter_available)); then
+              ip6tables -P OUTPUT DROP
+            fi
+
+            read_dns_resolvers
+
+            add_base_ipv4_rules
+            add_base_ipv6_rules
+            add_temporary_dns_rules
+            resolve_allowed_domains
+            write_allowed_domain_hosts
+
+            add_base_ipv4_rules
+            add_base_ipv6_rules
+            add_allowed_domain_rules
+            trap - ERR
+          }
+
+          ipv6_network_available() {
+            local iface
+
+            [[ -r /proc/net/if_inet6 ]] || return 1
+
+            while read -r _ _ _ _ _ iface; do
+              if [[ -n "$iface" && "$iface" != "lo" ]]; then
+                return 0
+              fi
+            done < /proc/net/if_inet6
+
+            return 1
+          }
+
+          read_dns_resolvers() {
+            local keyword resolver
+
+            [[ -r /etc/resolv.conf ]] || return 0
+
+            while read -r keyword resolver _; do
+              [[ "$keyword" == "nameserver" ]] || continue
+
+              case "$resolver" in
+                *:*)
+                  case "$resolver" in
+                    *[!0-9A-Fa-f:.%]*)
+                      continue
+                      ;;
+                  esac
+                  resolver="''${resolver%%%*}"
+                  dns_resolvers_v6+=("$resolver")
+                  ;;
+                *.*)
+                  case "$resolver" in
+                    *[!0-9.]*)
+                      continue
+                      ;;
+                  esac
+                  dns_resolvers_v4+=("$resolver")
+                  ;;
+              esac
+            done < /etc/resolv.conf
+          }
+
+          add_base_ipv4_rules() {
             iptables -F OUTPUT
             iptables -A OUTPUT -o lo -j ACCEPT
 
             if ! iptables -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null; then
               iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
             fi
+          }
 
-          ${dnsBlock}
+          add_base_ipv6_rules() {
+            ((ipv6_filter_available)) || return 0
+
+            ip6tables -F OUTPUT
+            ip6tables -A OUTPUT -o lo -j ACCEPT
+
+            if ! ip6tables -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null; then
+              ip6tables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
+            fi
+          }
+
+          add_temporary_dns_rules() {
+            local resolver
+
+            ((allow_dns)) || return 0
+            ((''${#allowed_domains[@]} > 0)) || return 0
+
+            if ((''${#dns_resolvers_v4[@]} == 0 && ''${#dns_resolvers_v6[@]} == 0)); then
+              echo "error: no nameserver entries found in /etc/resolv.conf; cannot resolve allowedDomains" >&2
+              return 1
+            fi
+
+            for resolver in "''${dns_resolvers_v4[@]}"; do
+              iptables -A OUTPUT -p udp -d "$resolver" --dport 53 -j ACCEPT
+              iptables -A OUTPUT -p tcp -d "$resolver" --dport 53 -j ACCEPT
+            done
+
+            if ((ipv6_filter_available)); then
+              for resolver in "''${dns_resolvers_v6[@]}"; do
+                ip6tables -A OUTPUT -p udp -d "$resolver" --dport 53 -j ACCEPT
+                ip6tables -A OUTPUT -p tcp -d "$resolver" --dport 53 -j ACCEPT
+              done
+            fi
+          }
+
+          resolve_allowed_domains() {
+            local domain ip
+
+            if (( ! allow_dns )); then
+              if ((''${#allowed_domains[@]} > 0)); then
+                echo "warning: allowDns=false; skipping allowedDomains DNS resolution" >&2
+              fi
+              return 0
+            fi
 
             for domain in "''${allowed_domains[@]}"; do
               while IFS= read -r ip; do
@@ -152,12 +277,55 @@ let
                     continue
                     ;;
                 esac
-                iptables -A OUTPUT -d "$ip" -j ACCEPT
-              done < <(dig +short "$domain" 2>/dev/null || true)
+                resolved_ipv4+=("$ip")
+                resolved_host_ips+=("$ip")
+                resolved_host_names+=("$domain")
+              done < <(dig +short A "$domain" 2>/dev/null || true)
+
+              if ((ipv6_filter_available)); then
+                while IFS= read -r ip; do
+                  case "$ip" in
+                    *:*)
+                      case "$ip" in
+                        *[!0-9A-Fa-f:.]*)
+                          continue
+                          ;;
+                      esac
+                      resolved_ipv6+=("$ip")
+                      resolved_host_ips+=("$ip")
+                      resolved_host_names+=("$domain")
+                      ;;
+                  esac
+                done < <(dig +short AAAA "$domain" 2>/dev/null || true)
+              fi
+            done
+          }
+
+          write_allowed_domain_hosts() {
+            local idx
+
+            ((''${#resolved_host_ips[@]} > 0)) || return 0
+
+            {
+              printf '\n# nix-apple-sandbox allowedDomains resolved at startup\n'
+              for idx in "''${!resolved_host_ips[@]}"; do
+                printf '%s %s\n' "''${resolved_host_ips[$idx]}" "''${resolved_host_names[$idx]}"
+              done
+            } >> /etc/hosts
+          }
+
+          add_allowed_domain_rules() {
+            local ip
+
+            for ip in "''${resolved_ipv4[@]}"; do
+              iptables -A OUTPUT -d "$ip" -j ACCEPT
             done
 
-            iptables -P OUTPUT DROP
-            trap - ERR
+            if ((ipv6_filter_available)); then
+              for ip in "''${resolved_ipv6[@]}"; do
+                ip6tables -A OUTPUT -d "$ip" -j ACCEPT
+              done
+            fi
           }
 
           setup_network_filter
