@@ -25,7 +25,87 @@ let
 
   sandboxHome = "/home/sandbox";
 
+  # Shell functions injected into the container entrypoint. They copy the
+  # read-only staged host credentials (mounted at
+  # $NIX_APPLE_SANDBOX_CREDENTIALS_DIR) into the throwaway in-container HOME.
+  #
+  # Safety properties:
+  #   * Only files placed in the staging dir by the host wrapper are imported;
+  #     the staging dir is a *copy*, never the real host files.
+  #   * Ownership is fixed only on files we copy and directories we create, so
+  #     we never recurse over a user-provided home mount that points at host
+  #     files (which would let the agent tamper with host state).
+  #   * Destinations backed by a host mount are skipped instead of written
+  #     through to the host.
+  credentialImportFunctions = ''
+    import_dest_within_mount() {
+      local dest=$1 dir
+      dir=$(dirname "$dest")
+      while :; do
+        if [[ -d "$dir" ]] && mountpoint -q "$dir" 2>/dev/null; then
+          return 0
+        fi
+        if [[ "$dir" == "$sandbox_home" || "$dir" == "/" ]]; then
+          break
+        fi
+        dir=$(dirname "$dir")
+      done
+      if [[ -e "$dest" ]] && mountpoint -q "$dest" 2>/dev/null; then
+        return 0
+      fi
+      return 1
+    }
+
+    create_credential_parents() {
+      local leaf=$1 dir entry
+      local -a pending=()
+      dir=$leaf
+      while [[ "$dir" != "$sandbox_home" && "$dir" != "/" ]]; do
+        pending=("$dir" "''${pending[@]}")
+        dir=$(dirname "$dir")
+      done
+      for entry in "''${pending[@]}"; do
+        mkdir -p "$entry"
+        chown "$sandbox_uid:$sandbox_gid" "$entry"
+        chmod 700 "$entry"
+      done
+    }
+
+    import_host_credentials() {
+      local src_dir=''${NIX_APPLE_SANDBOX_CREDENTIALS_DIR:-}
+      local rel dest
+
+      [[ -n "$src_dir" && -d "$src_dir" ]] || return 0
+
+      if ! command -v mountpoint >/dev/null 2>&1; then
+        echo "warning: 'mountpoint' unavailable; skipping host credential import" >&2
+        return 0
+      fi
+
+      while IFS= read -r -d "" rel; do
+        rel=''${rel#"$src_dir"/}
+        dest="$sandbox_home/$rel"
+
+        if import_dest_within_mount "$dest"; then
+          echo "warning: skipping imported credential '$rel'; destination is backed by a host mount" >&2
+          continue
+        fi
+
+        create_credential_parents "$(dirname "$dest")"
+        cp "$src_dir/$rel" "$dest"
+        chown "$sandbox_uid:$sandbox_gid" "$dest"
+        chmod 600 "$dest"
+      done < <(find "$src_dir" -type f -print0)
+    }
+  '';
+
   sortUnique = values: lib.sort builtins.lessThan (lib.unique values);
+
+  dedentGeneratedShell =
+    text:
+    lib.concatStringsSep "\n" (
+      map (line: lib.removePrefix "          " line) (lib.splitString "\n" text)
+    );
 
   renderEnvLines =
     envVars:
@@ -86,256 +166,262 @@ let
     in
     if allowAllOutbound then
       ''
-        #!/usr/bin/env bash
-        set -euo pipefail
+                  #!/usr/bin/env bash
+                  set -euo pipefail
 
-        sandbox_home=${lib.escapeShellArg sandboxHome}
-        sandbox_uid="''${NIX_APPLE_SANDBOX_UID:-1000}"
-        sandbox_gid="''${NIX_APPLE_SANDBOX_GID:-1000}"
-        sandbox_user="''${NIX_APPLE_SANDBOX_USER:-sandbox}"
+                  sandbox_home=${lib.escapeShellArg sandboxHome}
+                  sandbox_uid="''${NIX_APPLE_SANDBOX_UID:-1000}"
+                  sandbox_gid="''${NIX_APPLE_SANDBOX_GID:-1000}"
+                  sandbox_user="''${NIX_APPLE_SANDBOX_USER:-sandbox}"
 
-        mkdir -p "$sandbox_home"
-        chown "$sandbox_uid:$sandbox_gid" "$sandbox_home"
-        cd /workspace
+        ${credentialImportFunctions}
 
-        exec env HOME="$sandbox_home" USER="$sandbox_user" LOGNAME="$sandbox_user" \
-          setpriv --reuid "$sandbox_uid" --regid "$sandbox_gid" --clear-groups "$@"
+                  mkdir -p "$sandbox_home"
+                  chown "$sandbox_uid:$sandbox_gid" "$sandbox_home"
+                  import_host_credentials
+                  cd /workspace
+
+                  exec env HOME="$sandbox_home" USER="$sandbox_user" LOGNAME="$sandbox_user" \
+                    setpriv --reuid "$sandbox_uid" --regid "$sandbox_gid" --clear-groups "$@"
       ''
     else
       ''
-        #!/usr/bin/env bash
-        set -euo pipefail
+                  #!/usr/bin/env bash
+                  set -euo pipefail
 
-        allowed_domains=(${renderedDomains})
-        sandbox_home=${lib.escapeShellArg sandboxHome}
-        sandbox_uid="''${NIX_APPLE_SANDBOX_UID:-1000}"
-        sandbox_gid="''${NIX_APPLE_SANDBOX_GID:-1000}"
-        sandbox_user="''${NIX_APPLE_SANDBOX_USER:-sandbox}"
+                  allowed_domains=(${renderedDomains})
+                  sandbox_home=${lib.escapeShellArg sandboxHome}
+                  sandbox_uid="''${NIX_APPLE_SANDBOX_UID:-1000}"
+                  sandbox_gid="''${NIX_APPLE_SANDBOX_GID:-1000}"
+                  sandbox_user="''${NIX_APPLE_SANDBOX_USER:-sandbox}"
 
-        exec_as_sandbox() {
-          mkdir -p "$sandbox_home"
-          chown "$sandbox_uid:$sandbox_gid" "$sandbox_home"
-          cd /workspace
+        ${credentialImportFunctions}
 
-          exec env HOME="$sandbox_home" USER="$sandbox_user" LOGNAME="$sandbox_user" \
-            setpriv --reuid "$sandbox_uid" --regid "$sandbox_gid" --clear-groups "$@"
-        }
+                  exec_as_sandbox() {
+                    mkdir -p "$sandbox_home"
+                    chown "$sandbox_uid:$sandbox_gid" "$sandbox_home"
+                    import_host_credentials
+                    cd /workspace
 
-        setup_network_filter() {
-          local allow_dns=${allowDnsFlag}
-          local ipv6_filter_available=0
-          local -a dns_resolvers_v4=()
-          local -a dns_resolvers_v6=()
-          local -a resolved_ipv4=()
-          local -a resolved_ipv6=()
-          local -a resolved_host_ips=()
-          local -a resolved_host_names=()
+                    exec env HOME="$sandbox_home" USER="$sandbox_user" LOGNAME="$sandbox_user" \
+                      setpriv --reuid "$sandbox_uid" --regid "$sandbox_gid" --clear-groups "$@"
+                  }
 
-          if ! command -v iptables >/dev/null 2>&1; then
-            echo "error: iptables unavailable; refusing to start without outbound filter" >&2
-            exit 1
-          fi
+                  setup_network_filter() {
+                    local allow_dns=${allowDnsFlag}
+                    local ipv6_filter_available=0
+                    local -a dns_resolvers_v4=()
+                    local -a dns_resolvers_v6=()
+                    local -a resolved_ipv4=()
+                    local -a resolved_ipv6=()
+                    local -a resolved_host_ips=()
+                    local -a resolved_host_names=()
 
-          if ! iptables -L OUTPUT >/dev/null 2>&1; then
-            echo "error: iptables unsupported by kernel; refusing to start without outbound filter" >&2
-            exit 1
-          fi
+                    if ! command -v iptables >/dev/null 2>&1; then
+                      echo "error: iptables unavailable; refusing to start without outbound filter" >&2
+                      exit 1
+                    fi
 
-          if command -v ip6tables >/dev/null 2>&1 && ip6tables -L OUTPUT >/dev/null 2>&1; then
-            ipv6_filter_available=1
-          elif ipv6_network_available; then
-            echo "error: ip6tables unavailable or unsupported while IPv6 networking is enabled; refusing to start without IPv6 outbound filter" >&2
-            exit 1
-          fi
+                    if ! iptables -L OUTPUT >/dev/null 2>&1; then
+                      echo "error: iptables unsupported by kernel; refusing to start without outbound filter" >&2
+                      exit 1
+                    fi
 
-          rollback_filter() {
-            iptables -P OUTPUT ACCEPT >/dev/null 2>&1 || true
-            iptables -F OUTPUT >/dev/null 2>&1 || true
-            if ((ipv6_filter_available)); then
-              ip6tables -P OUTPUT ACCEPT >/dev/null 2>&1 || true
-              ip6tables -F OUTPUT >/dev/null 2>&1 || true
-            fi
-          }
+                    if command -v ip6tables >/dev/null 2>&1 && ip6tables -L OUTPUT >/dev/null 2>&1; then
+                      ipv6_filter_available=1
+                    elif ipv6_network_available; then
+                      echo "error: ip6tables unavailable or unsupported while IPv6 networking is enabled; refusing to start without IPv6 outbound filter" >&2
+                      exit 1
+                    fi
 
-          trap rollback_filter ERR
+                    rollback_filter() {
+                      iptables -P OUTPUT ACCEPT >/dev/null 2>&1 || true
+                      iptables -F OUTPUT >/dev/null 2>&1 || true
+                      if ((ipv6_filter_available)); then
+                        ip6tables -P OUTPUT ACCEPT >/dev/null 2>&1 || true
+                        ip6tables -F OUTPUT >/dev/null 2>&1 || true
+                      fi
+                    }
 
-          iptables -P OUTPUT DROP
-          if ((ipv6_filter_available)); then
-            ip6tables -P OUTPUT DROP
-          fi
+                    trap rollback_filter ERR
 
-          read_dns_resolvers
+                    iptables -P OUTPUT DROP
+                    if ((ipv6_filter_available)); then
+                      ip6tables -P OUTPUT DROP
+                    fi
 
-          add_base_ipv4_rules
-          add_base_ipv6_rules
-          add_temporary_dns_rules
-          resolve_allowed_domains
-          write_allowed_domain_hosts
+                    read_dns_resolvers
 
-          add_base_ipv4_rules
-          add_base_ipv6_rules
-          add_allowed_domain_rules
-          trap - ERR
-        }
+                    add_base_ipv4_rules
+                    add_base_ipv6_rules
+                    add_temporary_dns_rules
+                    resolve_allowed_domains
+                    write_allowed_domain_hosts
 
-        ipv6_network_available() {
-          local iface
+                    add_base_ipv4_rules
+                    add_base_ipv6_rules
+                    add_allowed_domain_rules
+                    trap - ERR
+                  }
 
-          [[ -r /proc/net/if_inet6 ]] || return 1
+                  ipv6_network_available() {
+                    local iface
 
-          while read -r _ _ _ _ _ iface; do
-            if [[ -n "$iface" && "$iface" != "lo" ]]; then
-              return 0
-            fi
-          done < /proc/net/if_inet6
+                    [[ -r /proc/net/if_inet6 ]] || return 1
 
-          return 1
-        }
+                    while read -r _ _ _ _ _ iface; do
+                      if [[ -n "$iface" && "$iface" != "lo" ]]; then
+                        return 0
+                      fi
+                    done < /proc/net/if_inet6
 
-        read_dns_resolvers() {
-          local keyword resolver
+                    return 1
+                  }
 
-          [[ -r /etc/resolv.conf ]] || return 0
+                  read_dns_resolvers() {
+                    local keyword resolver
 
-          while read -r keyword resolver _; do
-            [[ "$keyword" == "nameserver" ]] || continue
+                    [[ -r /etc/resolv.conf ]] || return 0
 
-            case "$resolver" in
-              *:*)
-                case "$resolver" in
-                  *[!0-9A-Fa-f:.%]*)
-                    continue
-                    ;;
-                esac
-                resolver="''${resolver%%%*}"
-                dns_resolvers_v6+=("$resolver")
-                ;;
-              *.*)
-                case "$resolver" in
-                  *[!0-9.]*)
-                    continue
-                    ;;
-                esac
-                dns_resolvers_v4+=("$resolver")
-                ;;
-            esac
-          done < /etc/resolv.conf
-        }
+                    while read -r keyword resolver _; do
+                      [[ "$keyword" == "nameserver" ]] || continue
 
-        add_base_ipv4_rules() {
-          iptables -F OUTPUT
-          iptables -A OUTPUT -o lo -j ACCEPT
+                      case "$resolver" in
+                        *:*)
+                          case "$resolver" in
+                            *[!0-9A-Fa-f:.%]*)
+                              continue
+                              ;;
+                          esac
+                          resolver="''${resolver%%%*}"
+                          dns_resolvers_v6+=("$resolver")
+                          ;;
+                        *.*)
+                          case "$resolver" in
+                            *[!0-9.]*)
+                              continue
+                              ;;
+                          esac
+                          dns_resolvers_v4+=("$resolver")
+                          ;;
+                      esac
+                    done < /etc/resolv.conf
+                  }
 
-          if ! iptables -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null; then
-            iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
-          fi
-        }
+                  add_base_ipv4_rules() {
+                    iptables -F OUTPUT
+                    iptables -A OUTPUT -o lo -j ACCEPT
 
-        add_base_ipv6_rules() {
-          ((ipv6_filter_available)) || return 0
+                    if ! iptables -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null; then
+                      iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
+                    fi
+                  }
 
-          ip6tables -F OUTPUT
-          ip6tables -A OUTPUT -o lo -j ACCEPT
+                  add_base_ipv6_rules() {
+                    ((ipv6_filter_available)) || return 0
 
-          if ! ip6tables -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null; then
-            ip6tables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
-          fi
-        }
+                    ip6tables -F OUTPUT
+                    ip6tables -A OUTPUT -o lo -j ACCEPT
 
-        add_temporary_dns_rules() {
-          local resolver
+                    if ! ip6tables -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null; then
+                      ip6tables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
+                    fi
+                  }
 
-          ((allow_dns)) || return 0
-          ((''${#allowed_domains[@]} > 0)) || return 0
+                  add_temporary_dns_rules() {
+                    local resolver
 
-          if ((''${#dns_resolvers_v4[@]} == 0 && ''${#dns_resolvers_v6[@]} == 0)); then
-            echo "error: no nameserver entries found in /etc/resolv.conf; cannot resolve allowedDomains" >&2
-            return 1
-          fi
+                    ((allow_dns)) || return 0
+                    ((''${#allowed_domains[@]} > 0)) || return 0
 
-          for resolver in "''${dns_resolvers_v4[@]}"; do
-            iptables -A OUTPUT -p udp -d "$resolver" --dport 53 -j ACCEPT
-            iptables -A OUTPUT -p tcp -d "$resolver" --dport 53 -j ACCEPT
-          done
+                    if ((''${#dns_resolvers_v4[@]} == 0 && ''${#dns_resolvers_v6[@]} == 0)); then
+                      echo "error: no nameserver entries found in /etc/resolv.conf; cannot resolve allowedDomains" >&2
+                      return 1
+                    fi
 
-          if ((ipv6_filter_available)); then
-            for resolver in "''${dns_resolvers_v6[@]}"; do
-              ip6tables -A OUTPUT -p udp -d "$resolver" --dport 53 -j ACCEPT
-              ip6tables -A OUTPUT -p tcp -d "$resolver" --dport 53 -j ACCEPT
-            done
-          fi
-        }
+                    for resolver in "''${dns_resolvers_v4[@]}"; do
+                      iptables -A OUTPUT -p udp -d "$resolver" --dport 53 -j ACCEPT
+                      iptables -A OUTPUT -p tcp -d "$resolver" --dport 53 -j ACCEPT
+                    done
 
-        resolve_allowed_domains() {
-          local domain ip
+                    if ((ipv6_filter_available)); then
+                      for resolver in "''${dns_resolvers_v6[@]}"; do
+                        ip6tables -A OUTPUT -p udp -d "$resolver" --dport 53 -j ACCEPT
+                        ip6tables -A OUTPUT -p tcp -d "$resolver" --dport 53 -j ACCEPT
+                      done
+                    fi
+                  }
 
-          if (( ! allow_dns )); then
-            if ((''${#allowed_domains[@]} > 0)); then
-              echo "warning: allowDns=false; skipping allowedDomains DNS resolution" >&2
-            fi
-            return 0
-          fi
+                  resolve_allowed_domains() {
+                    local domain ip
 
-          for domain in "''${allowed_domains[@]}"; do
-            while IFS= read -r ip; do
-              case "$ip" in
-                ""|*[!0-9.]*)
-                  continue
-                  ;;
-              esac
-              resolved_ipv4+=("$ip")
-              resolved_host_ips+=("$ip")
-              resolved_host_names+=("$domain")
-            done < <(dig +short A "$domain" 2>/dev/null || true)
+                    if (( ! allow_dns )); then
+                      if ((''${#allowed_domains[@]} > 0)); then
+                        echo "warning: allowDns=false; skipping allowedDomains DNS resolution" >&2
+                      fi
+                      return 0
+                    fi
 
-            if ((ipv6_filter_available)); then
-              while IFS= read -r ip; do
-                case "$ip" in
-                  *:*)
-                    case "$ip" in
-                      *[!0-9A-Fa-f:.]*)
-                        continue
-                        ;;
-                    esac
-                    resolved_ipv6+=("$ip")
-                    resolved_host_ips+=("$ip")
-                    resolved_host_names+=("$domain")
-                    ;;
-                esac
-              done < <(dig +short AAAA "$domain" 2>/dev/null || true)
-            fi
-          done
-        }
+                    for domain in "''${allowed_domains[@]}"; do
+                      while IFS= read -r ip; do
+                        case "$ip" in
+                          ""|*[!0-9.]*)
+                            continue
+                            ;;
+                        esac
+                        resolved_ipv4+=("$ip")
+                        resolved_host_ips+=("$ip")
+                        resolved_host_names+=("$domain")
+                      done < <(dig +short A "$domain" 2>/dev/null || true)
 
-        write_allowed_domain_hosts() {
-          local idx
+                      if ((ipv6_filter_available)); then
+                        while IFS= read -r ip; do
+                          case "$ip" in
+                            *:*)
+                              case "$ip" in
+                                *[!0-9A-Fa-f:.]*)
+                                  continue
+                                  ;;
+                              esac
+                              resolved_ipv6+=("$ip")
+                              resolved_host_ips+=("$ip")
+                              resolved_host_names+=("$domain")
+                              ;;
+                          esac
+                        done < <(dig +short AAAA "$domain" 2>/dev/null || true)
+                      fi
+                    done
+                  }
 
-          ((''${#resolved_host_ips[@]} > 0)) || return 0
+                  write_allowed_domain_hosts() {
+                    local idx
 
-          {
-            printf '\n# nix-apple-sandbox allowedDomains resolved at startup\n'
-            for idx in "''${!resolved_host_ips[@]}"; do
-              printf '%s %s\n' "''${resolved_host_ips[$idx]}" "''${resolved_host_names[$idx]}"
-            done
-          } >> /etc/hosts
-        }
+                    ((''${#resolved_host_ips[@]} > 0)) || return 0
 
-        add_allowed_domain_rules() {
-          local ip
+                    {
+                      printf '\n# nix-apple-sandbox allowedDomains resolved at startup\n'
+                      for idx in "''${!resolved_host_ips[@]}"; do
+                        printf '%s %s\n' "''${resolved_host_ips[$idx]}" "''${resolved_host_names[$idx]}"
+                      done
+                    } >> /etc/hosts
+                  }
 
-          for ip in "''${resolved_ipv4[@]}"; do
-            iptables -A OUTPUT -d "$ip" -j ACCEPT
-          done
+                  add_allowed_domain_rules() {
+                    local ip
 
-          if ((ipv6_filter_available)); then
-            for ip in "''${resolved_ipv6[@]}"; do
-              ip6tables -A OUTPUT -d "$ip" -j ACCEPT
-            done
-          fi
-        }
+                    for ip in "''${resolved_ipv4[@]}"; do
+                      iptables -A OUTPUT -d "$ip" -j ACCEPT
+                    done
 
-        setup_network_filter
-        exec_as_sandbox "$@"
+                    if ((ipv6_filter_available)); then
+                      for ip in "''${resolved_ipv6[@]}"; do
+                        ip6tables -A OUTPUT -d "$ip" -j ACCEPT
+                      done
+                    fi
+                  }
+
+                  setup_network_filter
+                  exec_as_sandbox "$@"
       '';
 in
 {
@@ -357,36 +443,60 @@ in
   extraVolumes ? [ ],
   publishPorts ? [ ],
   network ? null,
+  hostCredentialImports ? [ ],
+  autoHostCredentialImportsByCommand ? { },
 }:
 let
   normalizedAptPackages = sortUnique aptPackages;
   normalizedAllowedDomains = sortUnique allowedDomains;
   normalizedEnvVars = lib.mapAttrs (_: value: toString value) envVars;
-  configHash = builtins.substring 0 12 (
-    builtins.hashString "sha256" (
-      builtins.toJSON {
-        inherit
-          baseImage
-          installCommands
-          normalizedAptPackages
-          normalizedAllowedDomains
-          normalizedEnvVars
-          allowDns
-          allowAllOutbound
-          ;
-      }
-    )
-  );
   containerfile = renderContainerfile {
     inherit baseImage installCommands allowAllOutbound;
     aptPackages = normalizedAptPackages;
     envVars = normalizedEnvVars;
   };
-  entrypoint = renderEntrypoint {
+  entrypoint = dedentGeneratedShell (renderEntrypoint {
     allowedDomains = normalizedAllowedDomains;
     inherit allowDns allowAllOutbound;
-  };
+  });
+  configHash = builtins.substring 0 12 (
+    builtins.hashString "sha256" (
+      builtins.toJSON {
+        inherit containerfile entrypoint;
+      }
+    )
+  );
   renderRuntimeArray = values: lib.concatStringsSep " " (map lib.escapeShellArg values);
+  normalizeHostCredentialImport =
+    credential:
+    let
+      kind = credential.kind or "file";
+      target = credential.target;
+    in
+    {
+      inherit kind target;
+      name = credential.name or target;
+      source = credential.source or "";
+      keychainService = credential.keychainService or (credential.service or "");
+      keychainAccount = credential.keychainAccount or (credential.account or "");
+      jqFilter = credential.jqFilter or "";
+    };
+  renderHostCredentialAppendBlock =
+    credentials:
+    let
+      normalized = map normalizeHostCredentialImport credentials;
+      renderOne = credential: ''
+        append_host_credential_import \
+          ${lib.escapeShellArg credential.kind} \
+          ${lib.escapeShellArg credential.source} \
+          ${lib.escapeShellArg credential.target} \
+          ${lib.escapeShellArg credential.keychainService} \
+          ${lib.escapeShellArg credential.keychainAccount} \
+          ${lib.escapeShellArg credential.jqFilter} \
+          ${lib.escapeShellArg credential.name}
+      '';
+    in
+    lib.concatStringsSep "\n" (map renderOne normalized);
   renderAutoForwardedEnvBlock =
     mappings:
     let
@@ -415,11 +525,39 @@ let
               ;;
           esac
       '';
+  renderAutoHostCredentialImportBlock =
+    mappings:
+    let
+      commandNames = lib.sort builtins.lessThan (builtins.attrNames mappings);
+      renderCase = commandName: ''
+                  ${lib.escapeShellArg commandName})
+        ${renderHostCredentialAppendBlock mappings.${commandName}}
+                    ;;
+      '';
+    in
+    if commandNames == [ ] then
+      ''
+        :
+      ''
+    else
+      ''
+          case "$1" in
+        ${lib.concatStringsSep "\n" (map renderCase commandNames)}
+            *)
+              ;;
+          esac
+      '';
   defaultForwardedEnvBlocks = renderRuntimeArray passEnv;
   defaultHomeMountBlocks = renderRuntimeArray homeMounts;
   defaultPublishPortBlocks = renderRuntimeArray publishPorts;
   defaultVolumeBlocks = renderRuntimeArray extraVolumes;
   autoForwardedEnvBlock = renderAutoForwardedEnvBlock autoPassEnvByCommand;
+  defaultHostCredentialImportBlock =
+    let
+      block = renderHostCredentialAppendBlock hostCredentialImports;
+    in
+    if block == "" then "    :" else block;
+  autoHostCredentialImportBlock = renderAutoHostCredentialImportBlock autoHostCredentialImportsByCommand;
   commandDispatchBlock =
     if agentCommand == null then
       ''
@@ -456,11 +594,14 @@ pkgs.writeShellScriptBin name ''
     runtime_publish_ports=()
     runtime_extra_volumes=()
     runtime_direct_envs=()
+    runtime_host_credential_specs=()
     runtime_cpus=${lib.escapeShellArg (toString cpus)}
     runtime_memory=${lib.escapeShellArg memory}
     runtime_network=${lib.escapeShellArg (if network == null then "" else network)}
     runtime_ssh=${if sshForward then "1" else "0"}
     runtime_disable_auto_forwarded_envs=0
+    runtime_disable_host_credentials=0
+    credential_stage_dir=""
     fixed_agent_command=${lib.escapeShellArg (if agentCommand == null then "" else agentCommand)}
     container_cli=""
     minimum_container_version="0.10.0"
@@ -479,6 +620,10 @@ pkgs.writeShellScriptBin name ''
     --sandbox-no-auto-pass-env
                               Disable command-based automatic env forwarding
     --sandbox-env NAME=VALUE  Inject one env var directly for this run
+    --sandbox-no-host-credentials
+                              Disable host credential staging for this run
+    --sandbox-host-credential SPEC
+                              Stage one host credential file copy (example: .codex/auth.json:.codex/auth.json)
     --sandbox-home-mount SPEC Mount a path from \$HOME (example: .claude or .agents:${sandboxHome}/.agents)
     --sandbox-volume SPEC     Add one raw volume mount (host:guest)
     --sandbox-publish SPEC    Add one published port (host:container)
@@ -490,6 +635,9 @@ pkgs.writeShellScriptBin name ''
 
   notes:
     - runtime options must come before '--' or before the command
+    - host credentials are copied into a temporary directory, mounted read-only,
+      then copied into the container's throwaway HOME; real host credential files
+      are never mounted into the container
     - build-time settings such as aptPackages, installCommands, and outbound filtering
       still come from the Nix configuration because they affect the image contents
   EOF
@@ -539,6 +687,15 @@ pkgs.writeShellScriptBin name ''
           --sandbox-env)
             require_option_value "$1" "$#"
             runtime_direct_envs+=("$2")
+            shift 2
+            ;;
+          --sandbox-no-host-credentials)
+            runtime_disable_host_credentials=1
+            shift
+            ;;
+          --sandbox-host-credential)
+            require_option_value "$1" "$#"
+            runtime_host_credential_specs+=("$2")
             shift 2
             ;;
           --sandbox-home-mount)
@@ -667,13 +824,8 @@ pkgs.writeShellScriptBin name ''
         return 0
       fi
 
-      cat > "$context_dir/Containerfile" <<'EOF'
-  ${containerfile}
-  EOF
-
-      cat > "$context_dir/entrypoint.sh" <<'EOF'
-  ${entrypoint}
-  EOF
+      printf '%s\n' ${lib.escapeShellArg containerfile} > "$context_dir/Containerfile"
+      printf '%s\n' ${lib.escapeShellArg entrypoint} > "$context_dir/entrypoint.sh"
 
       "$container_cli" build -t "$image_tag" "$context_dir"
       touch "$marker_path"
@@ -821,6 +973,196 @@ pkgs.writeShellScriptBin name ''
       done
     }
 
+    append_host_credential_import() {
+      all_host_credential_kinds+=("$1")
+      all_host_credential_sources+=("$2")
+      all_host_credential_targets+=("$3")
+      all_host_credential_keychain_services+=("$4")
+      all_host_credential_keychain_accounts+=("$5")
+      all_host_credential_jq_filters+=("$6")
+      all_host_credential_names+=("$7")
+    }
+
+    add_default_host_credential_imports() {
+  ${defaultHostCredentialImportBlock}
+    }
+
+    resolve_auto_host_credential_imports() {
+  ${autoHostCredentialImportBlock}
+    }
+
+    resolve_host_path() {
+      local spec=$1
+
+      if [[ "$spec" == "~/"* ]]; then
+        printf '%s/%s\n' "$HOME" "''${spec#~/}"
+      elif [[ "$spec" == /* ]]; then
+        printf '%s\n' "$spec"
+      else
+        printf '%s/%s\n' "$HOME" "''${spec#./}"
+      fi
+    }
+
+    append_runtime_host_credential_import() {
+      local spec=$1 source_spec target source_path
+
+      if [[ "$spec" == *:* ]]; then
+        source_spec="''${spec%%:*}"
+        target="''${spec#*:}"
+      else
+        source_spec="$spec"
+        source_path="$(resolve_host_path "$source_spec")"
+
+        if [[ "$source_path" == "$HOME/"* ]]; then
+          target="''${source_path#$HOME/}"
+        else
+          target="$(basename "$source_path")"
+        fi
+      fi
+
+      append_host_credential_import "file" "$source_spec" "$target" "" "" "" "runtime:$source_spec"
+    }
+
+    normalize_credential_target() {
+      local target=$1
+
+      target="''${target#./}"
+      case "$target" in
+        ""|"."|".."|/*|../*|*/../*|*/..)
+          echo "error: unsafe host credential target: $1" >&2
+          exit 1
+          ;;
+      esac
+
+      printf '%s\n' "$target"
+    }
+
+    prepare_credential_destination() {
+      local target=$1 dest_path parent_dir
+
+      target="$(normalize_credential_target "$target")"
+      dest_path="$credential_stage_dir/$target"
+      parent_dir="$(dirname "$dest_path")"
+      mkdir -p "$parent_dir"
+      printf '%s\n' "$dest_path"
+    }
+
+    copy_file_host_credential() {
+      local source_spec=$1 target=$2 name=$3
+      local source_path dest_path
+
+      if [[ -z "$source_spec" ]]; then
+        echo "warning: host credential '$name' has no source; skipping" >&2
+        return 0
+      fi
+
+      source_path="$(resolve_host_path "$source_spec")"
+      if [[ ! -e "$source_path" ]]; then
+        echo "warning: host credential source not found: $source_path" >&2
+        return 0
+      fi
+
+      if [[ -L "$source_path" || ! -f "$source_path" ]]; then
+        echo "warning: host credential source is not a regular file: $source_path" >&2
+        return 0
+      fi
+
+      dest_path="$(prepare_credential_destination "$target")"
+      cp "$source_path" "$dest_path"
+      chmod 600 "$dest_path"
+    }
+
+    copy_keychain_host_credential() {
+      local service=$1 account=$2 jq_filter=$3 target=$4 name=$5
+      local dest_path tmp_path
+      local -a security_args
+
+      if [[ -z "$service" ]]; then
+        echo "warning: keychain host credential '$name' has no service; skipping" >&2
+        return 0
+      fi
+
+      if [[ ! -x /usr/bin/security ]]; then
+        echo "warning: /usr/bin/security unavailable; skipping keychain host credential '$name'" >&2
+        return 0
+      fi
+
+      dest_path="$(prepare_credential_destination "$target")"
+      tmp_path="$dest_path.tmp"
+      rm -f "$tmp_path"
+
+      security_args=(find-generic-password -s "$service" -w)
+      if [[ -n "$account" ]]; then
+        security_args+=( -a "$account" )
+      fi
+
+      if [[ -n "$jq_filter" ]]; then
+        if ! /usr/bin/security "''${security_args[@]}" 2>/dev/null | ${pkgs.jq}/bin/jq -c "$jq_filter" > "$tmp_path"; then
+          rm -f "$tmp_path"
+          echo "warning: failed to read/filter keychain host credential '$name'; skipping" >&2
+          return 0
+        fi
+      else
+        if ! /usr/bin/security "''${security_args[@]}" > "$tmp_path" 2>/dev/null; then
+          rm -f "$tmp_path"
+          echo "warning: failed to read keychain host credential '$name'; skipping" >&2
+          return 0
+        fi
+      fi
+
+      mv "$tmp_path" "$dest_path"
+      chmod 600 "$dest_path"
+    }
+
+    cleanup_staged_credentials() {
+      if [[ -n "$credential_stage_dir" && -d "$credential_stage_dir" ]]; then
+        rm -rf "$credential_stage_dir"
+      fi
+    }
+
+    stage_host_credentials() {
+      local idx kind source target service account jq_filter name staged_file
+
+      ((runtime_disable_host_credentials)) && return 0
+      ((''${#all_host_credential_kinds[@]} > 0)) || return 0
+
+      credential_stage_dir="$(mktemp -d "''${TMPDIR:-/tmp}/nix-apple-sandbox-credentials.XXXXXXXXXX")"
+      chmod 700 "$credential_stage_dir"
+      trap cleanup_staged_credentials EXIT
+
+      for idx in "''${!all_host_credential_kinds[@]}"; do
+        kind="''${all_host_credential_kinds[$idx]}"
+        source="''${all_host_credential_sources[$idx]}"
+        target="''${all_host_credential_targets[$idx]}"
+        service="''${all_host_credential_keychain_services[$idx]}"
+        account="''${all_host_credential_keychain_accounts[$idx]}"
+        jq_filter="''${all_host_credential_jq_filters[$idx]}"
+        name="''${all_host_credential_names[$idx]}"
+
+        case "$kind" in
+          file)
+            copy_file_host_credential "$source" "$target" "$name"
+            ;;
+          keychain-generic-password)
+            copy_keychain_host_credential "$service" "$account" "$jq_filter" "$target" "$name"
+            ;;
+          *)
+            echo "warning: unknown host credential kind '$kind' for '$name'; skipping" >&2
+            ;;
+        esac
+      done
+
+      staged_file="$(find "$credential_stage_dir" -type f -print -quit)"
+      if [[ -z "$staged_file" ]]; then
+        cleanup_staged_credentials
+        credential_stage_dir=""
+        return 0
+      fi
+
+      run_args+=(--mount "type=bind,source=$credential_stage_dir,target=/run/host-credentials,readonly")
+      run_args+=(--env "NIX_APPLE_SANDBOX_CREDENTIALS_DIR=/run/host-credentials")
+    }
+
     main() {
       local workspace_dir
       local effective_command_name
@@ -830,6 +1172,13 @@ pkgs.writeShellScriptBin name ''
       local -a all_home_mounts
       local -a all_publish_ports
       local -a all_extra_volumes
+      local -a all_host_credential_kinds
+      local -a all_host_credential_sources
+      local -a all_host_credential_targets
+      local -a all_host_credential_keychain_services
+      local -a all_host_credential_keychain_accounts
+      local -a all_host_credential_jq_filters
+      local -a all_host_credential_names
 
       parse_runtime_options "$@"
       effective_command_name="$(determine_effective_command_name)"
@@ -866,10 +1215,26 @@ pkgs.writeShellScriptBin name ''
       merge_forwarded_envs "''${runtime_forwarded_envs[@]}"
       drop_forwarded_envs
 
+      all_host_credential_kinds=()
+      all_host_credential_sources=()
+      all_host_credential_targets=()
+      all_host_credential_keychain_services=()
+      all_host_credential_keychain_accounts=()
+      all_host_credential_jq_filters=()
+      all_host_credential_names=()
+      if (( ! runtime_disable_host_credentials )); then
+        add_default_host_credential_imports
+        resolve_auto_host_credential_imports "$effective_command_name"
+        for host_credential_spec in "''${runtime_host_credential_specs[@]}"; do
+          append_runtime_host_credential_import "$host_credential_spec"
+        done
+      fi
+
       add_published_ports
       add_extra_volumes
 
       add_home_mounts
+      stage_host_credentials
       add_forwarded_envs
       add_direct_envs
 
