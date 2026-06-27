@@ -73,7 +73,8 @@ nix develop
             installCommands = ''
               RUN npm install -g @anthropic-ai/claude-code @openai/codex @google/gemini-cli
             '';
-            homeMounts = [ ".claude" ".agents" ];
+            autoHostCredentialImportsByCommand = sandbox.defaultAutoHostCredentialImportsByCommand;
+            homeMounts = [ ".agents" ];
             sshForward = true;
           })
         ];
@@ -134,6 +135,7 @@ nix develop
               codex = [ "OPENAI_API_KEY" ];
               gemini = [ "GEMINI_API_KEY" "GOOGLE_API_KEY" ];
             };
+            autoHostCredentialImportsByCommand = sandbox.defaultAutoHostCredentialImportsByCommand;
           })
         ];
       };
@@ -151,14 +153,26 @@ nix-apple-sandbox -- gemini
 `mkSandboxedCommand` は固定の `agentCommand` を持たず、`--` の後ろをそのままコンテナ内で実行する。何も渡さなければ `bash` を起動する。
 `autoPassEnvByCommand = { claude = [ "ANTHROPIC_API_KEY" ]; codex = [ "OPENAI_API_KEY" ]; gemini = [ "GEMINI_API_KEY" "GOOGLE_API_KEY" ]; };` のように指定すると、先頭の実行コマンドに応じて必要な env だけを自動転送できる。repo 付属の generic `nix-apple-sandbox` package はこの方式をデフォルトで使う。完全に止めたい場合は `--sandbox-no-auto-pass-env`、特定の env だけ外したい場合は `--sandbox-drop-pass-env NAME` を使う。明示的な `passEnv` や `--sandbox-pass-env` は引き続き追加できる。
 
-CLI の設定ディレクトリを持ち込みたい場合は `homeMounts` を使う。例えば `homeMounts = [ ".claude" ".agents" ];` とすると、ホスト側の `~/.claude` と `~/.agents` がそれぞれ `/home/sandbox/.claude` と `/home/sandbox/.agents` にマウントされる。存在しないパスは warning を出してスキップする。コンテナ内のプロセスは host の UID/GID に合わせた非 root ユーザとして実行される。
+`autoHostCredentialImportsByCommand = sandbox.defaultAutoHostCredentialImportsByCommand;` を指定すると、先頭の実行コマンドに応じてホスト側の既存ログイン情報を安全に持ち込める。repo 付属の generic `nix-apple-sandbox` package はこの方式をデフォルトで使う。
+
+| コマンド | デフォルトの取り込み元 | コンテナ内コピー先 |
+|---|---|---|
+| `codex` | `~/.codex/auth.json` | `/home/sandbox/.codex/auth.json` |
+| `claude` | macOS Keychain の `Claude Code-credentials` から `claudeAiOauth` だけ抽出 | `/home/sandbox/.claude/.credentials.json` |
+| `gemini` | `~/.gemini/oauth_creds.json` | `/home/sandbox/.gemini/oauth_creds.json` |
+
+取り込みは、ホスト側で必要な credential だけを一時ディレクトリへコピーし、その一時ディレクトリを `readonly` で `/run/host-credentials` にマウントし、entrypoint がコンテナ内の捨て HOME (`/home/sandbox`) へ再コピーする方式。実際の `~/.codex`, `~/.claude`, `~/.gemini` はコンテナにマウントしないため、エージェントがホスト側 credential ファイルや設定を書き換える経路を作らない。完全に止めたい場合は `--sandbox-no-host-credentials` を使う。
+
+注意: これは「ホスト credential への書き戻し」を避ける仕組みであり、コンテナ内へコピーされた credential はエージェントが利用できる。通信先を絞りたい場合は `allowAllOutbound = false` と `extraAllowedDomains` も併用する。Claude の Keychain 取り込みは macOS の `security` コマンドで Keychain を読むため、組織の EDR ポリシーに合わせて必要な場合だけ使う。
+
+CLI の設定ディレクトリを持ち込みたい場合は `homeMounts` を使う。ただし `homeMounts` は host path を container に bind mount するため、設定ファイルへの書き戻しを許す。credential を持ち込む目的で `homeMounts = [ ".codex" ".claude" ".gemini" ];` のように丸ごとマウントするのは避け、`hostCredentialImports` / `autoHostCredentialImportsByCommand` を使う。存在しないパスは warning を出してスキップする。コンテナ内のプロセスは host の UID/GID に合わせた非 root ユーザとして実行される。
 
 生成された wrapper は実行時 override も受ける。予約済みの `--sandbox-*` オプションだけを wrapper 側で解釈し、それ以外はそのままエージェント CLI に渡す。
 
 ```bash
 nix-apple-sandbox \
-  --sandbox-home-mount .claude \
   --sandbox-home-mount .agents:/home/sandbox/.agents \
+  --sandbox-host-credential .codex/auth.json:.codex/auth.json \
   --sandbox-env FOO=bar \
   --sandbox-cpus 8 \
   --sandbox-memory 16g \
@@ -167,11 +181,12 @@ nix-apple-sandbox \
 
 ```bash
 nix-apple-sandbox --sandbox-no-auto-pass-env -- claude
+nix-apple-sandbox --sandbox-no-host-credentials -- claude
 nix-apple-sandbox --sandbox-drop-pass-env ANTHROPIC_API_KEY -- claude
 nix-apple-sandbox --sandbox-pass-env OPENAI_API_KEY -- claude
 ```
 
-runtime で変えられるのは `cpus`, `memory`, `network`, `ssh`, `publishPorts`, `extraVolumes`, `homeMounts`, `passEnv`, 自動 `passEnv` の無効化/除外、追加 env 注入。`aptPackages`, `installCommands`, `extraAllowedDomains`, `allowAllOutbound`, `baseImage` のようなイメージ内容に効く設定は引き続き Nix 側で管理する。
+runtime で変えられるのは `cpus`, `memory`, `network`, `ssh`, `publishPorts`, `extraVolumes`, `homeMounts`, `passEnv`, 自動 `passEnv` の無効化/除外、host credential import の無効化/追加、追加 env 注入。`aptPackages`, `installCommands`, `extraAllowedDomains`, `allowAllOutbound`, `baseImage` のようなイメージ内容に効く設定は引き続き Nix 側で管理する。
 
 ### パターン2: Nix プロジェクト — `nixPackages` で自動マッピング
 
@@ -294,7 +309,10 @@ mkSandboxedCommand {
   installCommands     ? ""     # 実行したい CLI のインストール処理
   passEnv             ? []     # 必要なら認証・設定用 env を転送
   autoPassEnvByCommand ? {}    # { claude = [ "ANTHROPIC_API_KEY" ]; ... }
-  homeMounts          ? []     # [".claude" ".agents:/home/sandbox/.agents"]
+  hostCredentialImports ? []   # 常に stage する host credential 定義
+  autoHostCredentialImportsByCommand ? {}
+                              # { codex = [ defaultHostCredentialImports.codexAuth ]; ... }
+  homeMounts          ? []     # [".agents:/home/sandbox/.agents"]
   cpus                ? 4
   memory              ? "8g"
   allowAllOutbound    ? false
@@ -306,7 +324,26 @@ mkSandboxedCommand {
 ```
 
 生成されるコマンドは `nix-apple-sandbox -- <command>` の形で使う。何も渡さなければ `bash` を起動する。
-reserved runtime options として `--sandbox-cpus`, `--sandbox-memory`, `--sandbox-pass-env`, `--sandbox-drop-pass-env`, `--sandbox-no-auto-pass-env`, `--sandbox-env`, `--sandbox-home-mount`, `--sandbox-volume`, `--sandbox-publish`, `--sandbox-network`, `--sandbox-no-network`, `--sandbox-ssh`, `--sandbox-no-ssh` を受ける。
+reserved runtime options として `--sandbox-cpus`, `--sandbox-memory`, `--sandbox-pass-env`, `--sandbox-drop-pass-env`, `--sandbox-no-auto-pass-env`, `--sandbox-env`, `--sandbox-no-host-credentials`, `--sandbox-host-credential`, `--sandbox-home-mount`, `--sandbox-volume`, `--sandbox-publish`, `--sandbox-network`, `--sandbox-no-network`, `--sandbox-ssh`, `--sandbox-no-ssh` を受ける。
+
+`hostCredentialImports` の要素は以下の形。`target` は `/home/sandbox` からの相対パスで、`..` や絶対パスは拒否される。
+
+```nix
+{
+  name = "codex-auth";
+  kind = "file";
+  source = ".codex/auth.json";      # 相対パスは host の $HOME 基準
+  target = ".codex/auth.json";
+}
+
+{
+  name = "claude-code-oauth";
+  kind = "keychain-generic-password";
+  keychainService = "Claude Code-credentials";
+  jqFilter = "{claudeAiOauth}";     # 取り込む JSON 部分を絞る
+  target = ".claude/.credentials.json";
+}
+```
 
 ### `mkSandboxedClaudeCode { ... }` (integrate レベル)
 
@@ -315,7 +352,9 @@ mkSandboxedClaudeCode {
   nixPackages         ? []     # Nix derivations → apt に自動マッピング
   extraAptPackages    ? []     # 手動で追加する apt パッケージ
   extraAllowedDomains ? []     # ネットワーク制御時の追加ドメイン
-  homeMounts          ? []     # [".claude" ".agents"]
+  importHostCredentials ? true # 既存ログイン情報を一時 stage して HOME にコピー
+  hostCredentialImports ? []   # デフォルトを上書きしたい場合
+  homeMounts          ? []     # [".agents"]
   cpus                ? 4
   memory              ? "8g"
   allowAllOutbound    ? false  # true で全通信許可、false でドメインフィルタ有効
