@@ -9,13 +9,19 @@
     };
   };
 
-  outputs = { nixpkgs, apple-sandbox, ... }:
+  outputs =
+    { nixpkgs, apple-sandbox, ... }:
     let
       system = "aarch64-darwin";
       pkgs = nixpkgs.legacyPackages.${system};
       sandbox = apple-sandbox.lib.${system}.integrateWith pkgs;
-      projectPackages = with pkgs; [ go gopls postgresql ];
-    in {
+      projectPackages = with pkgs; [
+        go
+        gopls
+        postgresql
+      ];
+    in
+    {
       devShells.${system}.default = pkgs.mkShell {
         packages = projectPackages ++ [
           (sandbox.mkSandboxedClaudeCode {

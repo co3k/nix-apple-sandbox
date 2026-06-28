@@ -5,17 +5,20 @@
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
   };
 
-  outputs = { self, nixpkgs }:
+  outputs =
+    { self, nixpkgs }:
     let
       system = "aarch64-darwin";
       pkgs = import nixpkgs { inherit system; };
 
-      mkLib = pkgsFor:
+      mkLib =
+        pkgsFor:
         let
           mkSandboxedAgent = import ./lib/mkSandboxedAgent.nix { pkgs = pkgsFor; };
           presets = import ./lib/presets.nix { pkgs = pkgsFor; };
           integrate = import ./lib/integrate.nix { pkgs = pkgsFor; };
-        in {
+        in
+        {
           inherit integrate presets mkSandboxedAgent;
           integrateWith = otherPkgs: import ./lib/integrate.nix { pkgs = otherPkgs; };
           presetsWith = otherPkgs: import ./lib/presets.nix { pkgs = otherPkgs; };
@@ -24,21 +27,38 @@
 
       exportedLib = mkLib pkgs;
       genericAgentToolbox = exportedLib.presets.mkSandboxedCommand {
-        extraAptPackages = [ "nodejs" "npm" ];
-        extraAllowedDomains = [ "api.openai.com" "generativelanguage.googleapis.com" ];
+        extraAptPackages = [
+          "nodejs"
+          "npm"
+        ];
+        extraAllowedDomains = [
+          "api.openai.com"
+          "generativelanguage.googleapis.com"
+        ];
         installCommands = ''
           RUN npm install -g @anthropic-ai/claude-code @openai/codex @google/gemini-cli
         '';
         autoPassEnvByCommand = {
           claude = [ "ANTHROPIC_API_KEY" ];
           codex = [ "OPENAI_API_KEY" ];
-          gemini = [ "GEMINI_API_KEY" "GOOGLE_API_KEY" ];
+          gemini = [
+            "GEMINI_API_KEY"
+            "GOOGLE_API_KEY"
+          ];
         };
+        autoHostCredentialImportsByCommand = exportedLib.presets.defaultAutoHostCredentialImportsByCommand;
       };
-      mkTemplate = { path, description, welcomeText }: {
-        inherit path description welcomeText;
-      };
-    in {
+      mkTemplate =
+        {
+          path,
+          description,
+          welcomeText,
+        }:
+        {
+          inherit path description welcomeText;
+        };
+    in
+    {
       lib.${system} = exportedLib;
 
       packages.${system}.default = genericAgentToolbox;
