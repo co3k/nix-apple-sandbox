@@ -224,6 +224,7 @@ let
 
                     if ! iptables -L OUTPUT >/dev/null 2>&1; then
                       echo "error: iptables unsupported by kernel; refusing to start without outbound filter" >&2
+                      echo "hint: this wrapper was built with allowAllOutbound=false, but this Apple Containers kernel does not support iptables; rebuild with allowAllOutbound=true if unfiltered outbound network access is acceptable" >&2
                       exit 1
                     fi
 
@@ -445,6 +446,7 @@ in
   network ? null,
   hostCredentialImports ? [ ],
   autoHostCredentialImportsByCommand ? { },
+  hostCredentialImportAliases ? { },
 }:
 let
   normalizedAptPackages = sortUnique aptPackages;
@@ -547,6 +549,30 @@ let
               ;;
           esac
       '';
+  renderHostCredentialAliasBlock =
+    mappings:
+    let
+      aliasNames = lib.sort builtins.lessThan (builtins.attrNames mappings);
+      renderCase = aliasName: ''
+                  ${lib.escapeShellArg aliasName})
+        ${renderHostCredentialAppendBlock mappings.${aliasName}}
+                    return 0
+                    ;;
+      '';
+    in
+    if aliasNames == [ ] then
+      ''
+        return 1
+      ''
+    else
+      ''
+          case "$1" in
+        ${lib.concatStringsSep "\n" (map renderCase aliasNames)}
+            *)
+              return 1
+              ;;
+          esac
+      '';
   defaultForwardedEnvBlocks = renderRuntimeArray passEnv;
   defaultHomeMountBlocks = renderRuntimeArray homeMounts;
   defaultPublishPortBlocks = renderRuntimeArray publishPorts;
@@ -558,6 +584,7 @@ let
     in
     if block == "" then "    :" else block;
   autoHostCredentialImportBlock = renderAutoHostCredentialImportBlock autoHostCredentialImportsByCommand;
+  hostCredentialAliasBlock = renderHostCredentialAliasBlock hostCredentialImportAliases;
   commandDispatchBlock =
     if agentCommand == null then
       ''
@@ -623,7 +650,8 @@ pkgs.writeShellScriptBin name ''
     --sandbox-no-host-credentials
                               Disable host credential staging for this run
     --sandbox-host-credential SPEC
-                              Stage one host credential file copy (example: .codex/auth.json:.codex/auth.json)
+                              Stage one host credential file copy or alias
+                              (examples: codex, .codex/auth.json:.codex/auth.json)
     --sandbox-home-mount SPEC Mount a path from \$HOME (example: .claude or .agents:${sandboxHome}/.agents)
     --sandbox-volume SPEC     Add one raw volume mount (host:guest)
     --sandbox-publish SPEC    Add one published port (host:container)
@@ -631,7 +659,8 @@ pkgs.writeShellScriptBin name ''
     --sandbox-no-network      Clear any configured network for this run
     --sandbox-ssh             Enable SSH forwarding for this run
     --sandbox-no-ssh          Disable SSH forwarding for this run
-    --sandbox-help            Show this help and exit
+    --sandbox-help, -h, --help
+                              Show this help and exit
 
   notes:
     - runtime options must come before '--' or before the command
@@ -656,7 +685,7 @@ pkgs.writeShellScriptBin name ''
     parse_runtime_options() {
       while (($# > 0)); do
         case "$1" in
-          --sandbox-help)
+          --sandbox-help|-h|--help)
             print_runtime_help
             exit 0
             ;;
@@ -991,6 +1020,10 @@ pkgs.writeShellScriptBin name ''
   ${autoHostCredentialImportBlock}
     }
 
+    resolve_host_credential_alias() {
+  ${hostCredentialAliasBlock}
+    }
+
     resolve_host_path() {
       local spec=$1
 
@@ -1005,6 +1038,10 @@ pkgs.writeShellScriptBin name ''
 
     append_runtime_host_credential_import() {
       local spec=$1 source_spec target source_path
+
+      if resolve_host_credential_alias "$spec"; then
+        return 0
+      fi
 
       if [[ "$spec" == *:* ]]; then
         source_spec="''${spec%%:*}"

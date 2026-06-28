@@ -67,6 +67,8 @@ let
     gemini = [ defaultHostCredentialImports.geminiOAuth ];
   };
 
+  defaultHostCredentialImportAliases = defaultAutoHostCredentialImportsByCommand;
+
   joinInstallCommands =
     commands: lib.concatStringsSep "\n" (lib.filter (command: command != "") commands);
 
@@ -80,6 +82,7 @@ let
       autoPassEnvByCommand ? { },
       hostCredentialImports ? [ ],
       autoHostCredentialImportsByCommand ? { },
+      hostCredentialImportAliases ? defaultHostCredentialImportAliases,
       envVars ? { },
       cpus ? 4,
       memory ? "8g",
@@ -105,6 +108,7 @@ let
         autoPassEnvByCommand
         hostCredentialImports
         autoHostCredentialImportsByCommand
+        hostCredentialImportAliases
         envVars
         sshForward
         homeMounts
@@ -125,6 +129,7 @@ let
       baseAllowedDomains,
       hostCredentialImports ? [ ],
       autoHostCredentialImportsByCommand ? { },
+      hostCredentialImportAliases ? defaultHostCredentialImportAliases,
       extraAptPackages ? [ ],
       extraAllowedDomains ? [ ],
       cpus ? 4,
@@ -151,6 +156,7 @@ let
         passEnv
         hostCredentialImports
         autoHostCredentialImportsByCommand
+        hostCredentialImportAliases
         envVars
         sshForward
         homeMounts
@@ -173,7 +179,11 @@ let
 in
 {
   inherit mkSandboxedAgent commonAptPackages defaultAllowedDomains;
-  inherit defaultHostCredentialImports defaultAutoHostCredentialImportsByCommand;
+  inherit
+    defaultHostCredentialImports
+    defaultAutoHostCredentialImportsByCommand
+    defaultHostCredentialImportAliases
+    ;
   inherit mkSandboxedCommand;
 
   mkSandboxedClaudeCode =

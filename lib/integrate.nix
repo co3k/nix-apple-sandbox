@@ -118,6 +118,7 @@ in
     defaultAllowedDomains
     defaultHostCredentialImports
     defaultAutoHostCredentialImportsByCommand
+    defaultHostCredentialImportAliases
     ;
 
   mkSandboxedAgent = args: presets.mkSandboxedAgent (mergeResolvedAgentPackages args);
