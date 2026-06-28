@@ -41,7 +41,6 @@
             };
             autoHostCredentialImportsByCommand = sandbox.defaultAutoHostCredentialImportsByCommand;
             homeMounts = [ ".agents" ];
-            allowAllOutbound = true;
             sshForward = true;
           })
         ];

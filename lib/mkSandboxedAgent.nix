@@ -223,8 +223,8 @@ let
                     fi
 
                     if ! iptables -L OUTPUT >/dev/null 2>&1; then
-                      echo "error: iptables unsupported by kernel; refusing to start without outbound filter" >&2
-                      echo "hint: this wrapper was built with allowAllOutbound=false, but this Apple Containers kernel does not support iptables; rebuild with allowAllOutbound=true if unfiltered outbound network access is acceptable" >&2
+                      echo "error: cannot program iptables OUTPUT chain; refusing to start without outbound filter" >&2
+                      echo "hint: the container is missing CAP_NET_ADMIN (the wrapper normally passes --cap-add CAP_NET_ADMIN for filtered mode); ensure the Apple container CLI supports --cap-add, or rebuild with allowAllOutbound=true if unfiltered outbound access is acceptable" >&2
                       exit 1
                     fi
 
@@ -629,6 +629,7 @@ pkgs.writeShellScriptBin name ''
     runtime_disable_auto_forwarded_envs=0
     runtime_disable_host_credentials=0
     credential_stage_dir=""
+    filter_outbound=${if allowAllOutbound then "0" else "1"}
     fixed_agent_command=${lib.escapeShellArg (if agentCommand == null then "" else agentCommand)}
     container_cli=""
     minimum_container_version="0.10.0"
@@ -1229,11 +1230,20 @@ pkgs.writeShellScriptBin name ''
       ensure_container_system
       ensure_image
 
-      workspace_dir="$(pwd -P)"
-      run_args=(run --rm -it --cpus "$runtime_cpus" --memory "$runtime_memory" --volume "$workspace_dir:/workspace")
-      run_args+=(--env "NIX_APPLE_SANDBOX_UID=$(id -u)")
-      run_args+=(--env "NIX_APPLE_SANDBOX_GID=$(id -g)")
-      run_args+=(--env "NIX_APPLE_SANDBOX_USER=''${USER:-sandbox}")
+    workspace_dir="$(pwd -P)"
+    run_args=(run --rm -it --cpus "$runtime_cpus" --memory "$runtime_memory" --volume "$workspace_dir:/workspace")
+
+    # The startup outbound filter configures iptables/ip6tables, which needs
+    # CAP_NET_ADMIN. Apple Containers does not grant it by default. In
+    # filtered mode the capability is used only by the root entrypoint while
+    # installing the filter; the agent is then dropped to an unprivileged
+    # user via setpriv, so it cannot change the rules afterwards.
+    if ((filter_outbound)); then
+      run_args+=(--cap-add CAP_NET_ADMIN)
+    fi
+    run_args+=(--env "NIX_APPLE_SANDBOX_UID=$(id -u)")
+    run_args+=(--env "NIX_APPLE_SANDBOX_GID=$(id -g)")
+    run_args+=(--env "NIX_APPLE_SANDBOX_USER=''${USER:-sandbox}")
 
       if [[ -n "$runtime_network" ]]; then
         run_args+=(--network "$runtime_network")

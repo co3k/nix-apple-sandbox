@@ -47,7 +47,6 @@
           ];
         };
         autoHostCredentialImportsByCommand = exportedLib.presets.defaultAutoHostCredentialImportsByCommand;
-        allowAllOutbound = true;
       };
       mkTemplate =
         {

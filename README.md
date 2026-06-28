@@ -75,7 +75,6 @@ nix develop
             '';
             autoHostCredentialImportsByCommand = sandbox.defaultAutoHostCredentialImportsByCommand;
             homeMounts = [ ".agents" ];
-            allowAllOutbound = true;
             sshForward = true;
           })
         ];
@@ -137,7 +136,6 @@ nix develop
               gemini = [ "GEMINI_API_KEY" "GOOGLE_API_KEY" ];
             };
             autoHostCredentialImportsByCommand = sandbox.defaultAutoHostCredentialImportsByCommand;
-            allowAllOutbound = true;
           })
         ];
       };
@@ -430,15 +428,20 @@ macOS ホスト
 - ネットワーク制御はカーネル依存（best-effort、netfilter 必須）
 - パッケージマッピング（packageMap.nix）は主要パッケージのみカバー
 
-### `iptables unsupported by kernel`
+### `cannot program iptables OUTPUT chain` / 旧 `iptables unsupported by kernel`
 
-`allowAllOutbound = false` の wrapper は、コンテナ内で `iptables` / netfilter を使って outbound allow-list を構成する。Apple Containers の kernel が netfilter をサポートしていない環境では、通信制御を silently 無効化せず fail-closed するため、以下のエラーで停止する。
+`allowAllOutbound = false` の wrapper は、起動時にコンテナ内で `iptables` / `ip6tables` を使って outbound allow-list を構成する。これには `CAP_NET_ADMIN` が必要だが、Apple Containers はデフォルトでこの capability を付与しない。そのため wrapper は filtered mode のとき `--cap-add CAP_NET_ADMIN` を自動的に付けて `container run` する。capability は root の entrypoint が filter を設定する間だけ使われ、その後エージェントは `setpriv` で非特権ユーザに落とされるため、エージェント自身は rule を書き換えられない。
+
+次のエラーで停止する場合:
 
 ```text
-error: iptables unsupported by kernel; refusing to start without outbound filter
+error: cannot program iptables OUTPUT chain; refusing to start without outbound filter
 ```
 
-この場合、通信先制御なしでよい用途では Nix 側で `allowAllOutbound = true;` を設定して wrapper を作り直す。repo 付属の generic `nix-apple-sandbox` package と `generic-command` template は、CLI の認証確認をしやすいように `allowAllOutbound = true` を使う。
+主な原因と対処:
+
+- Apple container CLI が `--cap-add` をサポートしていない（古い版）。CLI を更新する。
+- それでも `iptables` を使えない環境では、通信先制御なしでよい用途に限り Nix 側で `allowAllOutbound = true;` を設定して wrapper を作り直す。ただし `allowAllOutbound = true` は egress フィルタを無効化するため、host credential を import する構成では特に通信先が無制限になる点に注意する。
 
 ## ライセンス
 
